@@ -184,15 +184,15 @@ disallowed-methods = [
 
 **Goal:** Stand up a zero-warning Rust workspace and Vite/TypeScript/Three.js frontend wired to `boomer-client` WASM before implementing game rules.
 
-- [ ] **0.1 Root Scaffolding:** Create `Cargo.toml` with `[workspace.lints]`, `clippy.toml` (`disallowed-methods`), `rust-toolchain.toml` (stable + `wasm32-unknown-unknown` + `clippy` + `rustfmt`), `.gitignore`, and `Makefile` (`check`, `test`, `wasm`, `determinism`, `dev`, `build`).
-- [ ] **0.2 Independent Inner Crates:**
+- [x] **0.1 Root Scaffolding:** Create `Cargo.toml` with `[workspace.lints]`, `clippy.toml` (`disallowed-methods`), `rust-toolchain.toml` (stable + `wasm32-unknown-unknown` + `clippy` + `rustfmt`), `.gitignore`, and `Makefile` (`check`, `test`, `wasm`, `determinism`, `dev`, `build`).
+- [x] **0.2 Independent Inner Crates:**
   - `crates/boomer-domain`: Core pure types (`GameKind`, `Seat`, `BotLevel`, `LocalMode { Hotseat, VsBot(BotLevel), FreePractice }`) and `math.rs` (`libm`-backed deterministic `f64` helpers + `canonical_zero(v)` normalizing `-0.0` to `+0.0`).
   - `crates/boomer-protocol`: Standalone wire JSON envelope (`#[serde(tag = "t", content = "d")]`), `ClientMessage`, `ServerMessage`, `ErrorCode` with zero dependency on `boomer-domain`.
-- [ ] **0.3 Client Port, Mapper & WASM Bridge:**
+- [x] **0.3 Client Port, Mapper & WASM Bridge:**
   - `crates/boomer-client/src/ports.rs`: Define `GameTransport` (`send`, `poll_messages`, `tick`), `ClockPort`, and `RandomPort`.
   - `crates/boomer-client/src/mapping.rs`: Explicit `From`/`TryFrom` conversions between `boomer-protocol` and `boomer-domain`.
   - `crates/boomer-client/src/lib.rs`: Expose thin `#[wasm_bindgen]` `BoomerClient` (`new`, `dispatch_input`, `tick`, `view_model`, and `Float64Array`-returning `pool_frame`).
-- [ ] **0.4 Vite + TypeScript + Three.js Shell:**
+- [x] **0.4 Vite + TypeScript + Three.js Shell:**
   - Strict TypeScript config, Three.js orthographic 2D canvas setup, classic 2000s Boomergames CSS theme (cream header, teal-grey side panel, plain rectangular buttons, Verdana/Tahoma stack, ≥16px base font, high-contrast CSS variables).
   - Interactive game-picker home screen (Checkers: Hotseat / vs. Easy / Medium / Hard; 8-Ball Pool: Hotseat / vs. Easy / Medium / Hard / Free Practice) driven entirely by WASM `ViewModel`.
 

@@ -1,0 +1,228 @@
+:root {
+  --bg-page: #cdd9dc;
+  --bg-header: #f4eed7;
+  --bg-panel: #dce6e8;
+  --bg-card: #f8f6ec;
+  --border-dark: #4f6469;
+  --border-light: #ffffff;
+  --text-main: #182226;
+  --text-muted: #405359;
+  --accent: #215b6d;
+  --accent-text: #ffffff;
+  --btn-bg: #e9e4cf;
+  --btn-hover: #dfd7b9;
+  --danger-bg: #fce6e6;
+  --danger-text: #7a1212;
+  font-size: 16px;
+}
+
+[data-contrast="high"] {
+  --bg-page: #000000;
+  --bg-header: #111111;
+  --bg-panel: #141414;
+  --bg-card: #1c1c1c;
+  --border-dark: #ffffff;
+  --border-light: #ffea00;
+  --text-main: #ffffff;
+  --text-muted: #e5e5e5;
+  --accent: #ffea00;
+  --accent-text: #000000;
+  --btn-bg: #262626;
+  --btn-hover: #3a3a3a;
+  --danger-bg: #4d0000;
+  --danger-text: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--bg-page);
+  color: var(--text-main);
+  font-family: Verdana, Tahoma, "DejaVu Sans", sans-serif;
+  line-height: 1.45;
+}
+
+.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.top-bar {
+  background: var(--bg-header);
+  border-bottom: 2px solid var(--border-dark);
+  padding: 0.75rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.65rem;
+}
+
+.brand-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.brand-badge {
+  font-size: 0.85rem;
+  padding: 0.15rem 0.5rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: 1px solid var(--border-dark);
+}
+
+.top-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.classic-btn {
+  font-family: inherit;
+  font-size: 1rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 0.9rem;
+  color: var(--text-main);
+  background: var(--btn-bg);
+  border-top: 2px solid var(--border-light);
+  border-left: 2px solid var(--border-light);
+  border-right: 2px solid var(--border-dark);
+  border-bottom: 2px solid var(--border-dark);
+  cursor: pointer;
+}
+
+.classic-btn:hover,
+.classic-btn:focus-visible {
+  background: var(--btn-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.classic-btn.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.main-area {
+  flex: 1;
+  padding: 1rem;
+  max-width: 1180px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.error-banner {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  border: 2px solid var(--danger-text);
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.home-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.game-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border-dark);
+  padding: 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.game-card h2 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.game-card p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.shell-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 820px) {
+  .shell-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.canvas-frame {
+  background: #1a2d1a;
+  border: 3px solid var(--border-dark);
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  position: relative;
+  overflow: hidden;
+}
+
+.canvas-frame canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.side-panel {
+  background: var(--bg-panel);
+  border: 2px solid var(--border-dark);
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.side-panel h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.status-box {
+  background: var(--bg-card);
+  border: 1px solid var(--border-dark);
+  padding: 0.65rem;
+  font-size: 0.95rem;
+}
+
+.footer-bar {
+  background: var(--bg-header);
+  border-top: 2px solid var(--border-dark);
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}

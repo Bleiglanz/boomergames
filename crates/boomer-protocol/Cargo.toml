@@ -1,0 +1,16 @@
+[package]
+name = "boomer-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Standalone JSON wire protocol DTOs shared between Boomergames client and server"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

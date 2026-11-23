@@ -1,0 +1,12 @@
+# Compile-time determinism guardrails for native vs. WASM floating-point parity.
+disallowed-methods = [
+    { path = "f64::sqrt", reason = "Use boomer_domain::math::sqrt (libm) for native/WASM bit determinism" },
+    { path = "f64::sin", reason = "Use boomer_domain::math::sin (libm) for native/WASM bit determinism" },
+    { path = "f64::cos", reason = "Use boomer_domain::math::cos (libm) for native/WASM bit determinism" },
+    { path = "f64::tan", reason = "Use boomer_domain::math::tan (libm) for native/WASM bit determinism" },
+    { path = "f64::atan2", reason = "Use boomer_domain::math::atan2 (libm) for native/WASM bit determinism" },
+    { path = "f64::hypot", reason = "Use boomer_domain::math::hypot (libm) for native/WASM bit determinism" },
+    { path = "f64::powf", reason = "Use boomer_domain::math::pow (libm) for native/WASM bit determinism" },
+    { path = "f64::powi", reason = "Use explicit multiplication or boomer_domain::math::pow for determinism" },
+    { path = "f64::mul_add", reason = "Avoid target-dependent FMA instructions; use separate multiply and add" },
+]
