@@ -206,7 +206,7 @@ disallowed-methods = [
 
 **Goal:** Deliver a complete, rule-accurate playable Checkers game (Hotseat + time-sliced 3-level AI) across the full Clean Architecture stack.
 
-- [ ] **1.1 Bitboard Engine & Rules (`boomer-domain::checkers`):**
+- [x] **1.1 Bitboard Engine & Rules (`boomer-domain::checkers`):**
   - 32-square bitboard state (`black_men`, `white_men`, `black_kings`, `white_kings` as `u32`), mapping standard notation `1..=32` (Black on `1..=12` moves first).
   - Diagonal 1-square moves for men (forward) and kings (forward/backward; no flying kings).
   - Mandatory captures and complete recursive multi-jump generation (player chooses capture path; no max-capture rule).
@@ -214,15 +214,15 @@ disallowed-methods = [
   - Win detection (no opponent pieces / no legal moves, resign, timeout) and draw detection (Offer Draw, threefold repetition, 40-move rule without capture or man move).
   - Standard algebraic notation (`11-15`, `22x15`, `22x15x8`).
   - Perft tests, edge-case unit tests, and `proptest` invariants.
-- [ ] **1.2 Time-Sliced Computer Opponent (`boomer-domain::checkers::ai`):**
+- [x] **1.2 Time-Sliced Computer Opponent (`boomer-domain::checkers::ai`):**
   - Resumable alpha-beta minimax (`CheckersSearch::step(node_budget)`) with capture quiescence, move ordering, and positional evaluation so Step 1 WASM stays locked at 60 fps (`~6–8 ms` per frame) while Step 2 server runs it to completion in one worker call.
   - **Endgame mop-up heuristic** (Hard): drives lone opponent kings to board edges/corners and minimizes Manhattan king distance to avoid aimless 40-move draws.
   - Seeded deterministic PRNG (`SplitMix64`): `Easy` (depth 2 + controlled error), `Medium` (depth 4 + slight jitter), `Hard` (depth 7 + full evaluation + endgame mop-up).
-- [ ] **1.3 Protocol & Offline Client (`boomer-protocol`, `boomer-client`):**
+- [x] **1.3 Protocol & Offline Client (`boomer-protocol`, `boomer-client`):**
   - `CheckersStateDto`, `CheckersActionDto { path }`, `CheckersResultDto { captured, crowned, notation, board }`, `CheckersSettingsDto` (per-move 20/30/60s or per-game 5/10/15m clock).
   - `LocalSessionAdapter` implementing `GameTransport` for Hotseat and vs. Bot (stepping `CheckersSearch` smoothly across `tick(dt_ms)` with a brief natural thinking floor so moves feel readable).
   - Multi-jump step-by-step OR single-click unambiguous destination selection, mandatory-capture filtering, clocks, Offer Draw, Resign, and alternating-color Rematch (no Undo, maintaining strict Step 2 parity).
-- [ ] **1.4 Classic 2D Board & HUD (`web/`):**
+- [x] **1.4 Classic 2D Board & HUD (`web/`):**
   - Three.js orthographic 2D 8×8 wooden/classic board, red & black flat discs with crisp king crowns, legal destination highlights, mandatory-capture highlight + *"You must capture"* banner, last-move highlight.
   - Optional **toggleable `1–32` dark-square numbers** on the board matching the standard notation move list.
   - Click-to-move and drag-and-drop input.

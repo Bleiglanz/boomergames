@@ -14,6 +14,7 @@
     )
 )]
 
+pub mod checkers;
 pub mod math;
 pub mod rng;
 

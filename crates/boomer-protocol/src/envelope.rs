@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::checkers::{CheckersSettingsDto, CheckersStateDto};
+
 /// Current wire protocol version validated during `hello` handshake.
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -118,6 +120,35 @@ pub enum ClientMessage {
     /// Leave the active offline game and return to the home picker.
     #[serde(rename = "local.leave")]
     LocalLeave {},
+    /// Submit a Checkers move path (`1..=32` notation).
+    #[serde(rename = "checkers.move")]
+    CheckersMove {
+        /// Expected turn number.
+        turn: u32,
+        /// Ordered sequence of `1..=32` dark squares.
+        path: Vec<u8>,
+    },
+    /// Update Checkers clock settings (applies immediately to a fresh match).
+    #[serde(rename = "checkers.settings")]
+    CheckersSettings {
+        /// Updated clock settings.
+        settings: CheckersSettingsDto,
+    },
+    /// Resign the active match.
+    #[serde(rename = "resign")]
+    Resign {},
+    /// Offer a draw in Checkers.
+    #[serde(rename = "draw.offer")]
+    DrawOffer {},
+    /// Accept or decline a pending draw offer in Checkers.
+    #[serde(rename = "draw.answer")]
+    DrawAnswer {
+        /// `true` to accept the draw, `false` to decline.
+        accept: bool,
+    },
+    /// Request a rematch (alternates starting colors).
+    #[serde(rename = "rematch")]
+    Rematch {},
 }
 
 /// Messages emitted from transport (`LocalSessionAdapter` or `boomer-server`) to client.
@@ -133,7 +164,7 @@ pub enum ServerMessage {
         /// Session transport kind.
         mode: SessionKindDto,
     },
-    /// Current offline session summary (Step 1 scaffold; extended with game states in Milestones 1 & 2).
+    /// Current offline session summary.
     #[serde(rename = "session.state")]
     SessionState {
         /// Active game, or `None` when on the home screen.
@@ -142,6 +173,12 @@ pub enum ServerMessage {
         mode: Option<LocalModeDto>,
         /// Human-readable status key.
         status: String,
+    },
+    /// Authoritative Checkers state snapshot.
+    #[serde(rename = "checkers.snapshot")]
+    CheckersSnapshot {
+        /// Complete Checkers state.
+        state: CheckersStateDto,
     },
     /// Structured protocol error response.
     #[serde(rename = "error")]
@@ -167,6 +204,18 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"t\":\"local.start\""));
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn checkers_move_round_trips_envelope() {
+        let msg = ClientMessage::CheckersMove {
+            turn: 4,
+            path: vec![22, 15, 8],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"t\":\"checkers.move\""));
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, msg);
     }

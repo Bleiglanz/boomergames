@@ -14,8 +14,13 @@
     )
 )]
 
+pub mod checkers;
 pub mod envelope;
 
+pub use checkers::{
+    CheckersClockModeDto, CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto,
+    CheckersOutcomeDto, CheckersSettingsDto, CheckersStateDto, CheckersWinReasonDto,
+};
 pub use envelope::{
     BotLevelDto, ClientMessage, ErrorCode, GameKindDto, LocalModeDto, PROTOCOL_VERSION, SeatDto,
     ServerMessage, SessionKindDto,

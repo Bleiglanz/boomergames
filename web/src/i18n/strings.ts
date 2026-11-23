@@ -16,9 +16,39 @@ export interface Strings {
   readonly freePractice: string;
   readonly statusLabel: string;
   readonly modeLabel: string;
-  readonly shellCheckersReady: string;
   readonly shellPoolReady: string;
   readonly footerNote: string;
+  readonly player1: string;
+  readonly player2: string;
+  readonly computer: string;
+  readonly colorBlack: string;
+  readonly colorWhite: string;
+  readonly yourTurn: string;
+  readonly botThinking: string;
+  readonly mustCapture: string;
+  readonly captured: string;
+  readonly flipBoard: string;
+  readonly showNumbers: string;
+  readonly offerDraw: string;
+  readonly resign: string;
+  readonly rematch: string;
+  readonly drawOfferedPrompt: string;
+  readonly acceptDraw: string;
+  readonly declineDraw: string;
+  readonly clockPreset: string;
+  readonly clockUnlimited: string;
+  readonly clockMove30: string;
+  readonly clockGame5: string;
+  readonly clockGame10: string;
+  readonly moveListTitle: string;
+  readonly noMovesYet: string;
+  readonly outcomeWinNoMoves: string;
+  readonly outcomeWinResign: string;
+  readonly outcomeWinTimeout: string;
+  readonly outcomeDrawAgreement: string;
+  readonly outcomeDrawRepetition: string;
+  readonly outcomeDrawFortyMove: string;
+  readonly drawDeclinedError: string;
 }
 
 const EN: Strings = {
@@ -37,9 +67,39 @@ const EN: Strings = {
   freePractice: "Free Practice",
   statusLabel: "Status",
   modeLabel: "Mode",
-  shellCheckersReady: "Checkers orthographic Three.js stage connected to Rust/WASM (Milestone 1 engine next).",
   shellPoolReady: "8-Ball Pool orthographic Three.js stage driven by Rust/WASM Float64Array rack (Milestone 2 physics next).",
   footerNote: "100% free · No cookies · Runs locally in Rust/WebAssembly",
+  player1: "Player 1",
+  player2: "Player 2",
+  computer: "Computer",
+  colorBlack: "Black",
+  colorWhite: "Red",
+  yourTurn: "Turn",
+  botThinking: "Computer is thinking…",
+  mustCapture: "You must capture!",
+  captured: "Captured",
+  flipBoard: "Flip Board",
+  showNumbers: "1–32 Numbers",
+  offerDraw: "Offer Draw",
+  resign: "Resign",
+  rematch: "Rematch (Swap Colors)",
+  drawOfferedPrompt: "Draw offered — accept?",
+  acceptDraw: "Accept Draw",
+  declineDraw: "Decline",
+  clockPreset: "Clock",
+  clockUnlimited: "No Timer",
+  clockMove30: "30s / move",
+  clockGame5: "5 min game",
+  clockGame10: "10 min game",
+  moveListTitle: "Moves",
+  noMovesYet: "No moves yet. Black moves first.",
+  outcomeWinNoMoves: "wins (no legal moves left)!",
+  outcomeWinResign: "wins by resignation!",
+  outcomeWinTimeout: "wins on time!",
+  outcomeDrawAgreement: "Draw by mutual agreement.",
+  outcomeDrawRepetition: "Draw by threefold repetition.",
+  outcomeDrawFortyMove: "Draw by 40-move rule.",
+  drawDeclinedError: "Computer declined your draw offer.",
 };
 
 const DE: Strings = {
@@ -58,9 +118,39 @@ const DE: Strings = {
   freePractice: "Freies Training",
   statusLabel: "Status",
   modeLabel: "Modus",
-  shellCheckersReady: "Dame-Bühne (Three.js 2D) mit Rust/WASM verbunden (Meilenstein 1 folgt).",
   shellPoolReady: "8-Ball-Bühne (Three.js 2D) über Rust/WASM Float64Array verbunden (Meilenstein 2 folgt).",
   footerNote: "100 % kostenlos · Keine Cookies · Läuft lokal in Rust/WebAssembly",
+  player1: "Spieler 1",
+  player2: "Spieler 2",
+  computer: "Computer",
+  colorBlack: "Schwarz",
+  colorWhite: "Rot",
+  yourTurn: "Am Zug",
+  botThinking: "Computer überlegt…",
+  mustCapture: "Schlagzwang!",
+  captured: "Geschlagen",
+  flipBoard: "Brett drehen",
+  showNumbers: "Felder 1–32",
+  offerDraw: "Remis anbieten",
+  resign: "Aufgeben",
+  rematch: "Revanche (Farben tauschen)",
+  drawOfferedPrompt: "Remis angeboten — annehmen?",
+  acceptDraw: "Remis annehmen",
+  declineDraw: "Ablehnen",
+  clockPreset: "Uhr",
+  clockUnlimited: "Ohne Uhr",
+  clockMove30: "30 s / Zug",
+  clockGame5: "5 Min. Partie",
+  clockGame10: "10 Min. Partie",
+  moveListTitle: "Zugliste",
+  noMovesYet: "Noch keine Züge. Schwarz beginnt.",
+  outcomeWinNoMoves: "gewinnt (keine legalen Züge)!",
+  outcomeWinResign: "gewinnt durch Aufgabe!",
+  outcomeWinTimeout: "gewinnt auf Zeit!",
+  outcomeDrawAgreement: "Unentschieden durch Einigung.",
+  outcomeDrawRepetition: "Unentschieden durch dreifache Stellungswiederholung.",
+  outcomeDrawFortyMove: "Unentschieden nach der 40-Züge-Regel.",
+  drawDeclinedError: "Der Computer hat das Remis-Angebot abgelehnt.",
 };
 
 export function getStrings(lang: string): Strings {

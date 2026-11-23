@@ -1,7 +1,13 @@
-//! Explicit `From`/`TryFrom` conversions between `boomer-protocol` DTOs and `boomer-domain`.
+//! Explicit conversions between `boomer-protocol` DTOs and `boomer-domain` types.
 
+use boomer_domain::checkers::{
+    CheckersColor, CheckersMove, CheckersOutcome, DrawReason, Square, WinReason,
+};
 use boomer_domain::{BotLevel, GameKind, LocalMode, Seat};
-use boomer_protocol::{BotLevelDto, GameKindDto, LocalModeDto, SeatDto};
+use boomer_protocol::{
+    BotLevelDto, CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto, CheckersOutcomeDto,
+    CheckersWinReasonDto, GameKindDto, LocalModeDto, SeatDto,
+};
 
 /// Converts a protocol [`GameKindDto`] into a domain [`GameKind`].
 #[must_use]
@@ -81,6 +87,68 @@ pub const fn local_mode_to_dto(mode: LocalMode) -> LocalModeDto {
     }
 }
 
+/// Converts a domain [`CheckersColor`] into a protocol [`CheckersColorDto`].
+#[must_use]
+pub const fn checkers_color_to_dto(color: CheckersColor) -> CheckersColorDto {
+    match color {
+        CheckersColor::Black => CheckersColorDto::Black,
+        CheckersColor::White => CheckersColorDto::White,
+    }
+}
+
+/// Converts a domain [`CheckersMove`] into a protocol [`CheckersMoveDto`].
+#[must_use]
+pub fn checkers_move_to_dto(mv: &CheckersMove) -> CheckersMoveDto {
+    CheckersMoveDto {
+        path: mv.path.iter().map(|sq| sq.notation()).collect(),
+        captured: mv.captured.iter().map(|sq| sq.notation()).collect(),
+        crowned: mv.crowned,
+        notation: mv.notation(),
+    }
+}
+
+/// Converts a sequence of `1..=32` notation squares into domain [`Square`]s.
+#[must_use]
+pub fn notation_path_to_squares(path: &[u8]) -> Option<Vec<Square>> {
+    path.iter().map(|&n| Square::from_notation(n)).collect()
+}
+
+/// Converts a domain [`CheckersOutcome`] into a protocol [`CheckersOutcomeDto`].
+#[must_use]
+pub const fn checkers_outcome_to_dto(
+    outcome: CheckersOutcome,
+    seat_colors: [CheckersColor; 2],
+) -> CheckersOutcomeDto {
+    match outcome {
+        CheckersOutcome::Win { winner, reason } => {
+            let [seat_one_color, _] = seat_colors;
+            let winner_seat = if seat_one_color as u8 == winner as u8 {
+                SeatDto::One
+            } else {
+                SeatDto::Two
+            };
+            let dto_reason = match reason {
+                WinReason::NoMoves => CheckersWinReasonDto::NoMoves,
+                WinReason::Resign => CheckersWinReasonDto::Resign,
+                WinReason::Timeout => CheckersWinReasonDto::Timeout,
+            };
+            CheckersOutcomeDto::Win {
+                winner: checkers_color_to_dto(winner),
+                winner_seat,
+                reason: dto_reason,
+            }
+        }
+        CheckersOutcome::Draw { reason } => {
+            let dto_reason = match reason {
+                DrawReason::Agreement => CheckersDrawReasonDto::Agreement,
+                DrawReason::ThreefoldRepetition => CheckersDrawReasonDto::ThreefoldRepetition,
+                DrawReason::FortyMoveRule => CheckersDrawReasonDto::FortyMoveRule,
+            };
+            CheckersOutcomeDto::Draw { reason: dto_reason }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +169,7 @@ mod tests {
             level: BotLevelDto::Hard,
         };
         assert_eq!(local_mode_to_dto(local_mode_from_dto(mode)), mode);
+        assert!(notation_path_to_squares(&[11, 15]).is_some());
+        assert!(notation_path_to_squares(&[0, 15]).is_none());
     }
 }

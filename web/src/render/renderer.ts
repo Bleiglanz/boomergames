@@ -1,6 +1,7 @@
 import * as THREE from "three";
 
-import type { GameKindDto } from "../wasm_bridge.js";
+import { CheckersScene, type CheckersBoardCallbacks } from "./checkers_scene.js";
+import type { CheckersView, GameKindDto } from "../wasm_bridge.js";
 
 const TABLE_WIDTH = 2.54;
 const TABLE_HEIGHT = 1.27;
@@ -33,26 +34,81 @@ export class StageRenderer {
   private readonly camera: THREE.OrthographicCamera;
   private readonly scene: THREE.Scene;
   private readonly poolGroup: THREE.Group;
-  private readonly checkersGroup: THREE.Group;
+  private readonly checkersScene: CheckersScene;
   private readonly ballMeshes: THREE.Group[] = [];
   private activeGame: GameKindDto | null = null;
+  private readonly canvas: HTMLCanvasElement;
+  private readonly container: HTMLElement;
+  private readonly resizeObserver: ResizeObserver;
+  private lastAspect = 1;
 
-  public constructor(container: HTMLElement) {
+  private readonly onPointerDownBound: (ev: PointerEvent) => void;
+  private readonly onPointerMoveBound: (ev: PointerEvent) => void;
+  private readonly onPointerUpBound: (ev: PointerEvent) => void;
+  private readonly onKeyDownBound: (ev: KeyboardEvent) => void;
+
+  public constructor(container: HTMLElement, checkersCallbacks: CheckersBoardCallbacks) {
+    this.container = container;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "default" });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.canvas = this.renderer.domElement;
+    this.canvas.tabIndex = 0;
+    this.canvas.setAttribute("aria-label", "Interactive game board");
     container.innerHTML = "";
-    container.appendChild(this.renderer.domElement);
+    container.appendChild(this.canvas);
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x1f3a24);
-    this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 20);
     this.camera.position.set(0, 0, 5);
     this.camera.lookAt(0, 0, 0);
 
     this.poolGroup = this.buildPoolStage();
-    this.checkersGroup = this.buildCheckersStage();
+    this.checkersScene = new CheckersScene(checkersCallbacks);
     this.scene.add(this.poolGroup);
-    this.scene.add(this.checkersGroup);
+    this.scene.add(this.checkersScene.root);
+
+    this.onPointerDownBound = (ev: PointerEvent): void => {
+      if (this.activeGame !== "checkers") {
+        return;
+      }
+      this.canvas.focus();
+      this.canvas.setPointerCapture(ev.pointerId);
+      const [wx, wy] = this.clientToWorld(ev.clientX, ev.clientY);
+      this.checkersScene.handlePointerDown(wx, wy, ev.clientX, ev.clientY);
+    };
+    this.onPointerMoveBound = (ev: PointerEvent): void => {
+      if (this.activeGame !== "checkers") {
+        return;
+      }
+      const [wx, wy] = this.clientToWorld(ev.clientX, ev.clientY);
+      this.checkersScene.handlePointerMove(wx, wy, ev.clientX, ev.clientY);
+    };
+    this.onPointerUpBound = (ev: PointerEvent): void => {
+      if (this.activeGame !== "checkers") {
+        return;
+      }
+      if (this.canvas.hasPointerCapture(ev.pointerId)) {
+        this.canvas.releasePointerCapture(ev.pointerId);
+      }
+      const [wx, wy] = this.clientToWorld(ev.clientX, ev.clientY);
+      this.checkersScene.handlePointerUp(wx, wy);
+    };
+    this.onKeyDownBound = (ev: KeyboardEvent): void => {
+      if (this.activeGame === "checkers" && this.checkersScene.handleKeyDown(ev.key)) {
+        ev.preventDefault();
+      }
+    };
+
+    this.canvas.addEventListener("pointerdown", this.onPointerDownBound);
+    this.canvas.addEventListener("pointermove", this.onPointerMoveBound);
+    this.canvas.addEventListener("pointerup", this.onPointerUpBound);
+    this.canvas.addEventListener("keydown", this.onKeyDownBound);
+
+    this.resizeObserver = new ResizeObserver(() => {
+      this.resize(this.container);
+    });
+    this.resizeObserver.observe(container);
 
     this.resize(container);
   }
@@ -60,15 +116,22 @@ export class StageRenderer {
   public setGame(game: GameKindDto): void {
     this.activeGame = game;
     this.poolGroup.visible = game === "pool";
-    this.checkersGroup.visible = game === "checkers";
+    this.checkersScene.root.visible = game === "checkers";
     this.scene.background = new THREE.Color(game === "pool" ? 0x264129 : 0x3a2a1e);
+    this.updateCameraProjection(this.lastAspect);
+  }
+
+  public syncCheckers(view: CheckersView): void {
+    this.checkersScene.sync(view);
   }
 
   public resize(container: HTMLElement): void {
-    const width = Math.max(1, container.clientWidth);
-    const height = Math.max(1, container.clientHeight);
+    const rect = container.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width || container.clientWidth));
+    const height = Math.max(1, Math.round(rect.height || container.clientHeight));
+    this.lastAspect = width / height;
     this.renderer.setSize(width, height, false);
-    this.updateCameraProjection(width / height);
+    this.updateCameraProjection(this.lastAspect);
   }
 
   public render(poolFrame?: Float64Array): void {
@@ -79,12 +142,28 @@ export class StageRenderer {
   }
 
   public dispose(): void {
+    this.resizeObserver.disconnect();
+    this.canvas.removeEventListener("pointerdown", this.onPointerDownBound);
+    this.canvas.removeEventListener("pointermove", this.onPointerMoveBound);
+    this.canvas.removeEventListener("pointerup", this.onPointerUpBound);
+    this.canvas.removeEventListener("keydown", this.onKeyDownBound);
     this.renderer.dispose();
   }
 
+  private clientToWorld(clientX: number, clientY: number): readonly [number, number] {
+    const rect = this.canvas.getBoundingClientRect();
+    const nx = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+    const ny = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+    const worldX =
+      this.camera.position.x + this.camera.left + nx * (this.camera.right - this.camera.left);
+    const worldY =
+      this.camera.position.y + this.camera.top - ny * (this.camera.top - this.camera.bottom);
+    return [worldX, worldY];
+  }
+
   private updateCameraProjection(aspect: number): void {
-    const worldW = this.activeGame === "checkers" ? 9.0 : TABLE_WIDTH + RAIL_MARGIN * 2.4;
-    const worldH = this.activeGame === "checkers" ? 9.0 : TABLE_HEIGHT + RAIL_MARGIN * 2.4;
+    const worldW = this.activeGame === "checkers" ? 8.9 : TABLE_WIDTH + RAIL_MARGIN * 2.4;
+    const worldH = this.activeGame === "checkers" ? 8.9 : TABLE_HEIGHT + RAIL_MARGIN * 2.4;
     const worldAspect = worldW / worldH;
 
     let halfW = worldW / 2;
@@ -98,17 +177,18 @@ export class StageRenderer {
     const cx = this.activeGame === "checkers" ? 4.0 : TABLE_WIDTH / 2;
     const cy = this.activeGame === "checkers" ? 4.0 : TABLE_HEIGHT / 2;
 
-    this.camera.left = cx - halfW;
-    this.camera.right = cx + halfW;
-    this.camera.top = cy + halfH;
-    this.camera.bottom = cy - halfH;
+    this.camera.position.set(cx, cy, 5);
+    this.camera.lookAt(cx, cy, 0);
+    this.camera.left = -halfW;
+    this.camera.right = halfW;
+    this.camera.top = halfH;
+    this.camera.bottom = -halfH;
     this.camera.updateProjectionMatrix();
   }
 
   private buildPoolStage(): THREE.Group {
     const group = new THREE.Group();
 
-    // Outer maroon wood rail frame (classic 2000s style)
     const railMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(TABLE_WIDTH + RAIL_MARGIN * 2, TABLE_HEIGHT + RAIL_MARGIN * 2),
       new THREE.MeshBasicMaterial({ color: 0x7c1717 }),
@@ -116,7 +196,6 @@ export class StageRenderer {
     railMesh.position.set(TABLE_WIDTH / 2, TABLE_HEIGHT / 2, 0.0);
     group.add(railMesh);
 
-    // Darker inner cushion edge
     const cushionMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(TABLE_WIDTH + 0.06, TABLE_HEIGHT + 0.06),
       new THREE.MeshBasicMaterial({ color: 0x1e661e }),
@@ -124,7 +203,6 @@ export class StageRenderer {
     cushionMesh.position.set(TABLE_WIDTH / 2, TABLE_HEIGHT / 2, 0.05);
     group.add(cushionMesh);
 
-    // Playing surface cloth (#2E8B2E)
     const clothMesh = new THREE.Mesh(
       new THREE.PlaneGeometry(TABLE_WIDTH, TABLE_HEIGHT),
       new THREE.MeshBasicMaterial({ color: 0x2e8b2e }),
@@ -132,7 +210,6 @@ export class StageRenderer {
     clothMesh.position.set(TABLE_WIDTH / 2, TABLE_HEIGHT / 2, 0.1);
     group.add(clothMesh);
 
-    // Head string line
     const headLine = new THREE.Mesh(
       new THREE.PlaneGeometry(0.004, TABLE_HEIGHT),
       new THREE.MeshBasicMaterial({ color: 0x62b262 }),
@@ -140,7 +217,6 @@ export class StageRenderer {
     headLine.position.set(0.635, TABLE_HEIGHT / 2, 0.15);
     group.add(headLine);
 
-    // 6 solid black pockets with tan accent caps
     const pocketCoords: readonly [number, number][] = [
       [0, 0],
       [TABLE_WIDTH / 2, -0.02],
@@ -164,7 +240,6 @@ export class StageRenderer {
       group.add(pocket);
     }
 
-    // 16 flat 2D pool balls
     const ballGeo = new THREE.CircleGeometry(BALL_RADIUS, 24);
     const stripeGeo = new THREE.PlaneGeometry(BALL_RADIUS * 1.9, BALL_RADIUS * 0.95);
     const dotGeo = new THREE.CircleGeometry(BALL_RADIUS * 0.42, 16);
@@ -197,41 +272,6 @@ export class StageRenderer {
       ball.visible = false;
       group.add(ball);
       this.ballMeshes.push(ball);
-    }
-
-    return group;
-  }
-
-  private buildCheckersStage(): THREE.Group {
-    const group = new THREE.Group();
-
-    const frame = new THREE.Mesh(
-      new THREE.PlaneGeometry(8.5, 8.5),
-      new THREE.MeshBasicMaterial({ color: 0x5c361e }),
-    );
-    frame.position.set(4.0, 4.0, 0.0);
-    group.add(frame);
-
-    const sqGeo = new THREE.PlaneGeometry(1.0, 1.0);
-    const lightMat = new THREE.MeshBasicMaterial({ color: 0xedd6b0 });
-    const darkMat = new THREE.MeshBasicMaterial({ color: 0x8c5a32 });
-    const discGeo = new THREE.CircleGeometry(0.38, 28);
-    const darkDiscMat = new THREE.MeshBasicMaterial({ color: 0x1e1e1e });
-    const redDiscMat = new THREE.MeshBasicMaterial({ color: 0xb82222 });
-
-    for (let row = 0; row < 8; row += 1) {
-      for (let col = 0; col < 8; col += 1) {
-        const isDark = (row + col) % 2 === 1;
-        const sq = new THREE.Mesh(sqGeo, isDark ? darkMat : lightMat);
-        sq.position.set(col + 0.5, 7.5 - row, 0.1);
-        group.add(sq);
-
-        if (isDark && (row < 3 || row > 4)) {
-          const piece = new THREE.Mesh(discGeo, row < 3 ? darkDiscMat : redDiscMat);
-          piece.position.set(col + 0.5, 7.5 - row, 0.25);
-          group.add(piece);
-        }
-      }
     }
 
     return group;
