@@ -32,9 +32,9 @@ pub use envelope::{
     ServerMessage, SessionKindDto,
 };
 pub use lobby::{
-    ChatLineDto, ChatScopeDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto,
-    TableGameOptsDto, TablePhaseDto, TableRoleDto, TableSettingsDto, TableSnapshotDto,
-    TableSummaryDto, TableUpdateDto, TableVisibilityDto,
+    ChatLineDto, ChatScopeDto, GameOverDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto,
+    RatingChangeDto, TableGameOptsDto, TablePhaseDto, TableRoleDto, TableSettingsDto,
+    TableSnapshotDto, TableSummaryDto, TableUpdateDto, TableVisibilityDto, WinCountDto,
 };
 pub use pool::{
     AimAidLevelDto, BallGroupDto, BallInHandRuleDto, EightOnBreakRuleDto, PoolBallDto, PoolFoulDto,

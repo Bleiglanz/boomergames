@@ -98,7 +98,12 @@ impl AppState {
         let online = Arc::new(AtomicU32::new(0));
         let tables = Arc::new(AtomicU32::new(0));
         let games = Arc::new(AtomicU32::new(0));
-        let hub = LobbyHub::new(Arc::clone(&online), Arc::clone(&tables), Arc::clone(&games));
+        let hub = LobbyHub::new(
+            Arc::clone(&online),
+            Arc::clone(&tables),
+            Arc::clone(&games),
+            Arc::clone(&matches),
+        );
         Self {
             config: Arc::new(config),
             signer,
@@ -122,10 +127,13 @@ impl AppState {
     /// Replaces the [`LobbyHub`] with custom capacity/auto-open thresholds (for integration tests).
     #[must_use]
     pub fn with_room_limits(mut self, room_capacity: usize, auto_open_threshold: u32) -> Self {
+        self.tables.store(0, Ordering::Relaxed);
+        self.games.store(0, Ordering::Relaxed);
         self.hub = LobbyHub::with_limits(
             Arc::clone(&self.online),
             Arc::clone(&self.tables),
             Arc::clone(&self.games),
+            Arc::clone(&self.matches),
             room_capacity,
             auto_open_threshold,
         );

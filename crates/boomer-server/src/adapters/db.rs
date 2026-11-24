@@ -1,6 +1,9 @@
 //! PostgreSQL persistence adapter powered by `sqlx` using `migrations/0001_initial.sql`.
 
 use boomer_domain::GameKind;
+use boomer_domain::rating::{
+    MatchScore, PlayerRatingInput, STARTING_RATING, calculate_match_elo, qualifies_for_highscore,
+};
 use chrono::{DateTime, Duration, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -9,7 +12,8 @@ use crate::auth::{MAX_AVATAR_INDEX, NAME_CHANGE_COOLDOWN_DAYS, validate_display_
 use crate::mapping::{game_kind_from_db, game_kind_to_db};
 use crate::ports::{
     BoxFuture, HealthCheck, HighscoreEntry, MatchHistoryItem, MatchRepo, PlayerStatRecord,
-    PortError, ReportRepo, StatsRepo, UserRecord, UserRepo,
+    PortError, RecordMatchInput, RecordMatchOutcome, RecordedRatingChange, RecordedWinCount,
+    ReportRepo, StatsRepo, UserRecord, UserRepo,
 };
 
 /// PostgreSQL adapter implementing all server persistence ports.
@@ -424,6 +428,231 @@ impl MatchRepo for PgRepos {
             }
             Ok(out)
         })
+    }
+
+    fn record_finished_match(
+        &self,
+        input: RecordMatchInput,
+    ) -> BoxFuture<'_, Result<RecordMatchOutcome, PortError>> {
+        Box::pin(async move { pg_record_finished_match(&self.pool, input).await })
+    }
+}
+
+async fn pg_record_finished_match(
+    pool: &PgPool,
+    input: RecordMatchInput,
+) -> Result<RecordMatchOutcome, PortError> {
+    let map_err = |e: sqlx::Error| PortError::Unavailable(e.to_string());
+    let game_str = game_kind_to_db(input.game);
+    let is_human_vs_human =
+        input.bot_level.is_none() && input.player1_id.is_some() && input.player2_id.is_some();
+    let rated = input.rated_requested && is_human_vs_human;
+
+    let mut tx = pool.begin().await.map_err(map_err)?;
+
+    let (pair_rated_today, pair_wins_today) = if let (Some(first_uid), Some(second_uid)) =
+        (input.player1_id, input.player2_id)
+    {
+        let row = sqlx::query(
+                "SELECT \
+                 COUNT(*) FILTER (WHERE rated) AS rated_cnt, \
+                 COUNT(*) FILTER (WHERE counts_for_highscore) AS win_cnt \
+                 FROM matches \
+                 WHERE game = $1 AND ended_at >= date_trunc('day', now()) \
+                   AND ((player1_id = $2 AND player2_id = $3) OR (player1_id = $3 AND player2_id = $2))",
+            )
+            .bind(game_str)
+            .bind(first_uid)
+            .bind(second_uid)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_err)?;
+        let r_cnt: i64 = row.try_get("rated_cnt").map_err(map_err)?;
+        let w_cnt: i64 = row.try_get("win_cnt").map_err(map_err)?;
+        (
+            u32::try_from(r_cnt).unwrap_or(u32::MAX),
+            u32::try_from(w_cnt).unwrap_or(u32::MAX),
+        )
+    } else {
+        (0, 0)
+    };
+
+    let counts_for_highscore = qualifies_for_highscore(
+        input.game,
+        is_human_vs_human,
+        input.winner.is_some(),
+        input.activity_count,
+        pair_wins_today,
+    );
+
+    let _ = sqlx::query(
+        "INSERT INTO matches (game, player1_id, player2_id, bot_level, winner, reason, rated, counts_for_highscore) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(game_str)
+    .bind(input.player1_id)
+    .bind(input.player2_id)
+    .bind(input.bot_level)
+    .bind(input.winner)
+    .bind(&input.reason)
+    .bind(rated)
+    .bind(counts_for_highscore)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_err)?;
+
+    let mut outcome = RecordMatchOutcome {
+        rated,
+        counts_for_highscore,
+        rating_changes: Vec::new(),
+        win_counts: Vec::new(),
+    };
+
+    if rated && let (Some(first_uid), Some(second_uid)) = (input.player1_id, input.player2_id) {
+        pg_apply_rated_updates(
+            &mut tx,
+            game_str,
+            first_uid,
+            second_uid,
+            input.winner,
+            pair_rated_today,
+            counts_for_highscore,
+            &mut outcome,
+        )
+        .await?;
+    } else if input.bot_level.is_none() {
+        for (uid_opt, seat_no) in [(input.player1_id, 1_i16), (input.player2_id, 2_i16)] {
+            if let Some(uid) = uid_opt
+                && let Some(wins) = pg_upsert_stat(
+                    &mut tx,
+                    uid,
+                    game_str,
+                    None,
+                    counts_for_highscore && input.winner == Some(seat_no),
+                )
+                .await?
+            {
+                outcome
+                    .win_counts
+                    .push(RecordedWinCount { user_id: uid, wins });
+            }
+        }
+    }
+
+    tx.commit().await.map_err(map_err)?;
+    Ok(outcome)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Transact helper passes explicit SQL transaction and match attributes"
+)]
+async fn pg_apply_rated_updates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    game_str: &str,
+    first_uid: i64,
+    second_uid: i64,
+    winner: Option<i16>,
+    pair_rated_today: u32,
+    counts_for_highscore: bool,
+    outcome: &mut RecordMatchOutcome,
+) -> Result<(), PortError> {
+    let first_in = pg_fetch_rating(tx, first_uid, game_str).await?;
+    let second_in = pg_fetch_rating(tx, second_uid, game_str).await?;
+    let score = match winner {
+        Some(1) => MatchScore::SeatOneWin,
+        Some(2) => MatchScore::SeatTwoWin,
+        _ => MatchScore::Draw,
+    };
+    let (upd_one, upd_two) = calculate_match_elo(first_in, second_in, score, pair_rated_today);
+    for (uid, upd, won_seat) in [(first_uid, upd_one, 1_i16), (second_uid, upd_two, 2_i16)] {
+        if let Some(wins) = pg_upsert_stat(
+            tx,
+            uid,
+            game_str,
+            Some((upd.new_rating, upd.new_rated_games)),
+            counts_for_highscore && winner == Some(won_seat),
+        )
+        .await?
+        {
+            outcome
+                .win_counts
+                .push(RecordedWinCount { user_id: uid, wins });
+        }
+        outcome.rating_changes.push(RecordedRatingChange {
+            user_id: uid,
+            old_rating: upd.old_rating,
+            new_rating: upd.new_rating,
+            new_rated_games: upd.new_rated_games,
+        });
+    }
+    Ok(())
+}
+
+async fn pg_fetch_rating(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i64,
+    game_str: &str,
+) -> Result<PlayerRatingInput, PortError> {
+    let map_err = |e: sqlx::Error| PortError::Unavailable(e.to_string());
+    let row = sqlx::query(
+        "SELECT rating, rated_games FROM player_stats WHERE user_id = $1 AND game = $2",
+    )
+    .bind(user_id)
+    .bind(game_str)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_err)?;
+    match row {
+        Some(r) => Ok(PlayerRatingInput {
+            rating: r.try_get("rating").map_err(map_err)?,
+            rated_games: r.try_get("rated_games").map_err(map_err)?,
+        }),
+        None => Ok(PlayerRatingInput {
+            rating: STARTING_RATING,
+            rated_games: 0,
+        }),
+    }
+}
+
+async fn pg_upsert_stat(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i64,
+    game_str: &str,
+    new_rating: Option<(i32, i32)>,
+    counted_win: bool,
+) -> Result<Option<u32>, PortError> {
+    let map_err = |e: sqlx::Error| PortError::Unavailable(e.to_string());
+    let (rating_val, rated_games_val, has_rating) = match new_rating {
+        Some((r, rg)) => (r, rg, true),
+        None => (STARTING_RATING, 0, false),
+    };
+    let win_inc: i32 = i32::from(counted_win);
+    let row = sqlx::query(
+        "INSERT INTO player_stats (user_id, game, rating, rated_games, games, wins, wins_reached_at) \
+         VALUES ($1, $2, $3, $4, 1, $5, CASE WHEN $5 > 0 THEN now() ELSE NULL END) \
+         ON CONFLICT (user_id, game) DO UPDATE SET \
+           rating = CASE WHEN $6 THEN $3 ELSE player_stats.rating END, \
+           rated_games = CASE WHEN $6 THEN $4 ELSE player_stats.rated_games END, \
+           games = player_stats.games + 1, \
+           wins = player_stats.wins + $5, \
+           wins_reached_at = CASE WHEN $5 > 0 THEN now() ELSE player_stats.wins_reached_at END \
+         RETURNING wins",
+    )
+    .bind(user_id)
+    .bind(game_str)
+    .bind(rating_val)
+    .bind(rated_games_val)
+    .bind(win_inc)
+    .bind(has_rating)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_err)?;
+    if counted_win {
+        let wins_i32: i32 = row.try_get("wins").map_err(map_err)?;
+        Ok(Some(u32::try_from(wins_i32).unwrap_or(0)))
+    } else {
+        Ok(None)
     }
 }
 

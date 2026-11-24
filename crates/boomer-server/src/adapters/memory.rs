@@ -5,12 +5,16 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use boomer_domain::GameKind;
+use boomer_domain::rating::{
+    MatchScore, PlayerRatingInput, STARTING_RATING, calculate_match_elo, qualifies_for_highscore,
+};
 use chrono::{DateTime, Duration, Utc};
 
 use crate::auth::{MAX_AVATAR_INDEX, NAME_CHANGE_COOLDOWN_DAYS, validate_display_name};
 use crate::ports::{
     BoxFuture, GoogleTokenVerifier, HealthCheck, HighscoreEntry, MailSender, MatchHistoryItem,
-    MatchRepo, PlayerStatRecord, PortError, ReportRepo, StatsRepo, UserRecord, UserRepo,
+    MatchRepo, PlayerStatRecord, PortError, RecordMatchInput, RecordMatchOutcome,
+    RecordedRatingChange, RecordedWinCount, ReportRepo, StatsRepo, UserRecord, UserRepo,
     VerifiedGoogleUser,
 };
 
@@ -27,8 +31,11 @@ struct StoredMatch {
     game: GameKind,
     player1_id: Option<i64>,
     player2_id: Option<i64>,
-    opponent_label: String,
+    player1_label: String,
+    player2_label: String,
     winner: Option<i16>,
+    rated: bool,
+    counts_for_highscore: bool,
     ended_at: DateTime<Utc>,
 }
 
@@ -106,8 +113,11 @@ impl MemoryRepos {
             game,
             player1_id,
             player2_id,
-            opponent_label,
+            player1_label: opponent_label.clone(),
+            player2_label: opponent_label,
             winner,
+            rated: false,
+            counts_for_highscore: false,
             ended_at: Utc::now(),
         });
         Ok(())
@@ -386,7 +396,11 @@ impl MatchRepo for MemoryRepos {
                     };
                     MatchHistoryItem {
                         game: m.game,
-                        opponent_name: m.opponent_label.clone(),
+                        opponent_name: if is_p1 {
+                            m.player2_label.clone()
+                        } else {
+                            m.player1_label.clone()
+                        },
                         result: result.to_owned(),
                         ended_at: m.ended_at,
                     }
@@ -395,6 +409,225 @@ impl MatchRepo for MemoryRepos {
             rows.truncate(limit);
             Ok(rows)
         })
+    }
+
+    fn record_finished_match(
+        &self,
+        input: RecordMatchInput,
+    ) -> BoxFuture<'_, Result<RecordMatchOutcome, PortError>> {
+        Box::pin(async move {
+            let now = Utc::now();
+            let day_start = now.date_naive();
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+
+            let is_human_vs_human = input.bot_level.is_none()
+                && input.player1_id.is_some()
+                && input.player2_id.is_some();
+            let rated = input.rated_requested && is_human_vs_human;
+
+            let (pair_rated_today, pair_wins_today) =
+                if let (Some(u1), Some(u2)) = (input.player1_id, input.player2_id) {
+                    count_pair_today(&guard.matches, input.game, u1, u2, day_start)
+                } else {
+                    (0, 0)
+                };
+
+            let counts_for_highscore = qualifies_for_highscore(
+                input.game,
+                is_human_vs_human,
+                input.winner.is_some(),
+                input.activity_count,
+                pair_wins_today,
+            );
+
+            let mut outcome = RecordMatchOutcome {
+                rated,
+                counts_for_highscore,
+                rating_changes: Vec::new(),
+                win_counts: Vec::new(),
+            };
+
+            if rated
+                && let (Some(first_uid), Some(second_uid)) = (input.player1_id, input.player2_id)
+            {
+                mem_apply_rated_updates(
+                    &mut guard.stats,
+                    input.game,
+                    first_uid,
+                    second_uid,
+                    input.winner,
+                    pair_rated_today,
+                    counts_for_highscore,
+                    now,
+                    &mut outcome,
+                );
+            } else if input.bot_level.is_none() {
+                for (uid_opt, seat_no) in [(input.player1_id, 1_i16), (input.player2_id, 2_i16)] {
+                    if let Some(uid) = uid_opt {
+                        apply_mem_stat(
+                            &mut guard.stats,
+                            uid,
+                            input.game,
+                            None,
+                            counts_for_highscore && input.winner == Some(seat_no),
+                            now,
+                            &mut outcome.win_counts,
+                        );
+                    }
+                }
+            }
+
+            guard.matches.push(StoredMatch {
+                game: input.game,
+                player1_id: input.player1_id,
+                player2_id: input.player2_id,
+                player1_label: input.player1_label,
+                player2_label: input.player2_label,
+                winner: input.winner,
+                rated,
+                counts_for_highscore,
+                ended_at: now,
+            });
+            Ok(outcome)
+        })
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "In-memory parity helper mirrors pg_apply_rated_updates"
+)]
+fn mem_apply_rated_updates(
+    stats: &mut BTreeMap<(i64, u8), PlayerStatRecord>,
+    game: GameKind,
+    first_uid: i64,
+    second_uid: i64,
+    winner: Option<i16>,
+    pair_rated_today: u32,
+    counts_for_highscore: bool,
+    now: DateTime<Utc>,
+    outcome: &mut RecordMatchOutcome,
+) {
+    let first_stat = mem_stat_or_default(stats, first_uid, game);
+    let second_stat = mem_stat_or_default(stats, second_uid, game);
+    let score = match winner {
+        Some(1) => MatchScore::SeatOneWin,
+        Some(2) => MatchScore::SeatTwoWin,
+        _ => MatchScore::Draw,
+    };
+    let (upd_one, upd_two) = calculate_match_elo(
+        PlayerRatingInput {
+            rating: first_stat.rating,
+            rated_games: first_stat.rated_games,
+        },
+        PlayerRatingInput {
+            rating: second_stat.rating,
+            rated_games: second_stat.rated_games,
+        },
+        score,
+        pair_rated_today,
+    );
+    for (uid, upd, won_seat) in [(first_uid, upd_one, 1_i16), (second_uid, upd_two, 2_i16)] {
+        apply_mem_stat(
+            stats,
+            uid,
+            game,
+            Some((upd.new_rating, upd.new_rated_games)),
+            counts_for_highscore && winner == Some(won_seat),
+            now,
+            &mut outcome.win_counts,
+        );
+        outcome.rating_changes.push(RecordedRatingChange {
+            user_id: uid,
+            old_rating: upd.old_rating,
+            new_rating: upd.new_rating,
+            new_rated_games: upd.new_rated_games,
+        });
+    }
+}
+
+fn count_pair_today(
+    matches: &[StoredMatch],
+    game: GameKind,
+    first_uid: i64,
+    second_uid: i64,
+    today: chrono::NaiveDate,
+) -> (u32, u32) {
+    let mut rated_cnt: u32 = 0;
+    let mut win_cnt: u32 = 0;
+    for m in matches {
+        if m.game != game || m.ended_at.date_naive() != today {
+            continue;
+        }
+        let same_pair = (m.player1_id == Some(first_uid) && m.player2_id == Some(second_uid))
+            || (m.player1_id == Some(second_uid) && m.player2_id == Some(first_uid));
+        if !same_pair {
+            continue;
+        }
+        if m.rated {
+            rated_cnt = rated_cnt.saturating_add(1);
+        }
+        if m.counts_for_highscore {
+            win_cnt = win_cnt.saturating_add(1);
+        }
+    }
+    (rated_cnt, win_cnt)
+}
+
+fn mem_stat_or_default(
+    stats: &BTreeMap<(i64, u8), PlayerStatRecord>,
+    user_id: i64,
+    game: GameKind,
+) -> PlayerStatRecord {
+    stats
+        .get(&(user_id, game_key(game)))
+        .cloned()
+        .unwrap_or(PlayerStatRecord {
+            user_id,
+            game,
+            rating: STARTING_RATING,
+            rated_games: 0,
+            games: 0,
+            wins: 0,
+            wins_reached_at: None,
+        })
+}
+
+fn apply_mem_stat(
+    stats: &mut BTreeMap<(i64, u8), PlayerStatRecord>,
+    user_id: i64,
+    game: GameKind,
+    new_rating: Option<(i32, i32)>,
+    counted_win: bool,
+    now: DateTime<Utc>,
+    win_counts: &mut Vec<RecordedWinCount>,
+) {
+    let entry = stats
+        .entry((user_id, game_key(game)))
+        .or_insert(PlayerStatRecord {
+            user_id,
+            game,
+            rating: STARTING_RATING,
+            rated_games: 0,
+            games: 0,
+            wins: 0,
+            wins_reached_at: None,
+        });
+    entry.games = entry.games.saturating_add(1);
+    if let Some((rating, rated_games)) = new_rating {
+        entry.rating = rating;
+        entry.rated_games = rated_games;
+    }
+    if counted_win {
+        entry.wins = entry.wins.saturating_add(1);
+        entry.wins_reached_at = Some(now);
+        win_counts.push(RecordedWinCount {
+            user_id,
+            wins: u32::try_from(entry.wins).unwrap_or(0),
+        });
     }
 }
 

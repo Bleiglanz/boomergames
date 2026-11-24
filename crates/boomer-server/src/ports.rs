@@ -175,7 +175,67 @@ pub trait StatsRepo: Send + Sync {
     ) -> BoxFuture<'_, Result<Vec<HighscoreEntry>, PortError>>;
 }
 
-/// Port for finished match history queries.
+/// Atomic persistence request for a completed multiplayer or bot match.
+#[derive(Debug, Clone)]
+pub struct RecordMatchInput {
+    /// Game played.
+    pub game: GameKind,
+    /// Registered `users.id` in Seat 1 (`None` for guests).
+    pub player1_id: Option<i64>,
+    /// Registered `users.id` in Seat 2 (`None` for guests or bots).
+    pub player2_id: Option<i64>,
+    /// Seat 1 display label (used for history when opponent is a guest/bot).
+    pub player1_label: String,
+    /// Seat 2 display label.
+    pub player2_label: String,
+    /// Bot difficulty (`Some(1|2|3)`) when playing against a computer bot.
+    pub bot_level: Option<i16>,
+    /// Winning seat (`Some(1)`, `Some(2)`, or `None` for draw).
+    pub winner: Option<i16>,
+    /// Short finish reason (`"no_moves"`, `"eight_ball_pocketed"`, `"resign"`, `"timeout"`, ...).
+    pub reason: String,
+    /// Whether the table was configured as rated (both seats must be registered humans).
+    pub rated_requested: bool,
+    /// Activity count (Checkers plies or Pool shots) for minimum High Score threshold.
+    pub activity_count: u32,
+}
+
+/// Rating change recorded for a single player in an atomic match-finish transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedRatingChange {
+    /// Registered `users.id`.
+    pub user_id: i64,
+    /// Rating before the match.
+    pub old_rating: i32,
+    /// Rating after the match.
+    pub new_rating: i32,
+    /// Updated rated games count.
+    pub new_rated_games: i32,
+}
+
+/// Updated High Score win count recorded for the match winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedWinCount {
+    /// Registered `users.id`.
+    pub user_id: i64,
+    /// Total counted human wins for this game.
+    pub wins: u32,
+}
+
+/// Result returned by [`MatchRepo::record_finished_match`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordMatchOutcome {
+    /// Whether the match affected Elo ratings.
+    pub rated: bool,
+    /// Whether the win incremented High Scores.
+    pub counts_for_highscore: bool,
+    /// Rating updates applied (0 or 2 entries).
+    pub rating_changes: Vec<RecordedRatingChange>,
+    /// Updated win counts applied (0 or 1 entry).
+    pub win_counts: Vec<RecordedWinCount>,
+}
+
+/// Port for finished match history & atomic post-match persistence.
 pub trait MatchRepo: Send + Sync {
     /// Returns the most recent `limit` matches involving `user_id`.
     fn recent_matches(
@@ -183,6 +243,13 @@ pub trait MatchRepo: Send + Sync {
         user_id: i64,
         limit: usize,
     ) -> BoxFuture<'_, Result<Vec<MatchHistoryItem>, PortError>>;
+
+    /// Atomically inserts the `matches` row and upserts `player_stats` (Elo + High Score wins)
+    /// enforcing the 5-wins/day/opponent cap, anti-farming decay, and minimum activity threshold.
+    fn record_finished_match(
+        &self,
+        input: RecordMatchInput,
+    ) -> BoxFuture<'_, Result<RecordMatchOutcome, PortError>>;
 }
 
 /// Port for moderation reports.

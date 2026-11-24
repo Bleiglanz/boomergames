@@ -1,22 +1,36 @@
-//! Single-table actor (`tokio` task per table, zero shared locks).
+//! Single-table actor (`tokio` task per table, zero shared locks) hosting
+//! authoritative `boomer-domain` Checkers & 8-Ball Pool games, House Bots,
+//! bounded `spawn_blocking` AI turns, and atomic Elo / High Score persistence.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use boomer_domain::Seat;
+use boomer_domain::checkers::CheckersColor;
+use boomer_domain::rating::is_provisional;
 use boomer_protocol::{
-    BotLevelDto, ChatLineDto, ChatScopeDto, ErrorCode, GameKindDto, KickReasonDto, SeatDto,
-    ServerMessage, TablePhaseDto, TableRoleDto, TableSettingsDto, TableSnapshotDto,
-    TableSummaryDto, TableUpdateDto, TableVisibilityDto, UserDto, UserStatusDto,
+    BotLevelDto, ChatLineDto, ChatScopeDto, ErrorCode, GameKindDto, GameOverDto, KickReasonDto,
+    PoolShotDto, RatingChangeDto, SeatDto, ServerMessage, TablePhaseDto, TableRoleDto,
+    TableSettingsDto, TableSnapshotDto, TableSummaryDto, TableUpdateDto, TableVisibilityDto,
+    UserDto, UserStatusDto, WinCountDto,
 };
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::actors::game_session::{
+    ActiveGame, BotDecision, BotWorkRequest, MatchFinishInfo, ServerCheckersMatch, ServerPoolMatch,
+    spawn_bot_turn,
+};
 use crate::actors::hub::LobbyHub;
 use crate::actors::lobby_actor::LobbyEvent;
 use crate::actors::{
     ClientSink, MAX_CHAT_HISTORY, bot_user_dto, broadcast_msg, sanitize_chat_text,
 };
+use crate::mapping::{
+    bot_level_to_db, format_user_id, game_kind_from_dto, parse_user_id, seat_to_dto,
+};
+use crate::ports::{RecordMatchInput, RecordMatchOutcome};
 
 /// Rejoin cooldown after being booted by the table host (5 minutes per Milestone 5.3).
 const BOOT_BLOCK_DURATION: Duration = Duration::from_secs(5 * 60);
@@ -91,6 +105,20 @@ impl SeatOccupant {
         }
     }
 
+    fn label(&self) -> String {
+        match self {
+            Self::Human(client) => client.user.name.clone(),
+            Self::Bot(level) => bot_user_dto(*level, UserStatusDto::Waiting).name,
+        }
+    }
+
+    fn bot_level(&self) -> Option<BotLevelDto> {
+        match self {
+            Self::Bot(level) => Some(*level),
+            Self::Human(_) => None,
+        }
+    }
+
     const fn is_bot(&self) -> bool {
         matches!(self, Self::Bot(_))
     }
@@ -108,12 +136,14 @@ pub struct TableInit {
     pub game: GameKindDto,
     /// Initial table settings.
     pub settings: TableSettingsDto,
-    /// Seat 1 occupant (always the initial host).
-    pub host: TableClient,
+    /// Seat 1 occupant (`None` for always-open 🤖 House Bot tables).
+    pub host: Option<TableClient>,
     /// Optional Seat 2 human occupant (for `Play Now` or accepted invites).
     pub second_human: Option<TableClient>,
-    /// Optional Seat 2 computer bot (for `play.now { vsBot }`).
+    /// Optional Seat 2 computer bot (for House Bot tables or `play.now { vsBot }`).
     pub second_bot: Option<BotLevelDto>,
+    /// `true` for always-open room House Bot tables that stay open when empty.
+    pub is_house_bot: bool,
 }
 
 /// Downward commands processed by a [`TableActor`].
@@ -194,6 +224,67 @@ pub enum TableCmd {
         /// Updated mute state.
         muted: bool,
     },
+    /// Authoritative Checkers move from a seated player.
+    CheckersMove {
+        /// Acting user wire ID.
+        user_id: String,
+        /// Expected turn counter.
+        turn: u32,
+        /// Move square path (`1..=32`).
+        path: Vec<u8>,
+    },
+    /// Authoritative Pool shot from a seated player.
+    PoolShoot {
+        /// Acting user wire ID.
+        user_id: String,
+        /// Shot parameters.
+        shot: PoolShotDto,
+    },
+    /// Cue-ball placement during Pool ball-in-hand.
+    PoolPlaceCue {
+        /// Acting user wire ID.
+        user_id: String,
+        /// Target X coordinate in metres.
+        x: f64,
+        /// Target Y coordinate in metres.
+        y: f64,
+    },
+    /// Resign the active match.
+    Resign {
+        /// Resigning user wire ID.
+        user_id: String,
+    },
+    /// Offer a draw in Checkers.
+    DrawOffer {
+        /// Offering user wire ID.
+        user_id: String,
+    },
+    /// Answer a pending draw offer in Checkers.
+    DrawAnswer {
+        /// Responding user wire ID.
+        user_id: String,
+        /// `true` to accept, `false` to decline.
+        accept: bool,
+    },
+    /// Request a post-match rematch (alternates starting colors / breaker).
+    Rematch {
+        /// Seated player wire ID.
+        user_id: String,
+    },
+    /// Internal callback delivering an AI move/shot computed on `spawn_blocking`.
+    BotDecision {
+        /// Turn counter when search started (stale results are ignored).
+        turn: u32,
+        /// Chosen move or shot.
+        decision: BotDecision,
+    },
+    /// Internal callback after atomic `MatchRepo::record_finished_match` completes.
+    MatchPersisted {
+        /// Terminal finish info.
+        finish: MatchFinishInfo,
+        /// Persisted Elo and High Score outcome.
+        outcome: RecordMatchOutcome,
+    },
 }
 
 /// Authoritative actor owning a single table's state with zero shared locks.
@@ -206,13 +297,18 @@ pub struct TableActor {
     settings: TableSettingsDto,
     seats: [Option<SeatOccupant>; 2],
     ready: [bool; 2],
+    rematch_ready: [bool; 2],
     watchers: HashMap<String, TableClient>,
     phase: TablePhaseDto,
     chat: VecDeque<ChatLineDto>,
-    turn: u32,
-    active_seat: Option<SeatDto>,
+    active_game: Option<ActiveGame>,
+    bot_thinking: bool,
+    match_index: u32,
+    is_house_bot: bool,
+    house_bot_level: Option<BotLevelDto>,
     booted_until: HashMap<String, Instant>,
     invited_ids: HashSet<String>,
+    self_tx: mpsc::Sender<TableCmd>,
     rx: mpsc::Receiver<TableCmd>,
     lobby_events: mpsc::Sender<LobbyEvent>,
     hub: Arc<LobbyHub>,
@@ -228,23 +324,30 @@ impl TableActor {
         hub: &Arc<LobbyHub>,
     ) -> (TableHandle, TableSummaryDto, TableSnapshotDto) {
         let (tx, rx) = mpsc::channel(TABLE_CMD_CAPACITY);
-        let host_id = init.host.user.id.clone();
+        let host_id = init
+            .host
+            .as_ref()
+            .map_or_else(String::new, |h| h.user.id.clone());
 
         let mut settings = init.settings;
-        if init.host.user.guest
+        if init.is_house_bot
             || init.second_bot.is_some()
+            || init.host.as_ref().is_some_and(|c| c.user.guest)
             || init.second_human.as_ref().is_some_and(|c| c.user.guest)
         {
             settings.rated = false;
         }
 
+        let first_seat = init.host.map(|h| {
+            hub.set_user_table(&h.user.id, &init.id);
+            SeatOccupant::Human(h)
+        });
         let second_seat = if let Some(human) = init.second_human {
             hub.set_user_table(&human.user.id, &init.id);
             Some(SeatOccupant::Human(human))
         } else {
             init.second_bot.map(SeatOccupant::Bot)
         };
-        hub.set_user_table(&host_id, &init.id);
 
         let initial_ready = [
             false,
@@ -258,15 +361,24 @@ impl TableActor {
             game: init.game,
             host_id,
             settings,
-            seats: [Some(SeatOccupant::Human(init.host)), second_seat],
+            seats: [first_seat, second_seat],
             ready: initial_ready,
+            rematch_ready: [false, false],
             watchers: HashMap::new(),
             phase: TablePhaseDto::Waiting,
             chat: VecDeque::with_capacity(MAX_CHAT_HISTORY),
-            turn: 0,
-            active_seat: None,
+            active_game: None,
+            bot_thinking: false,
+            match_index: 0,
+            is_house_bot: init.is_house_bot,
+            house_bot_level: if init.is_house_bot {
+                init.second_bot
+            } else {
+                None
+            },
             booted_until: HashMap::new(),
             invited_ids: HashSet::new(),
+            self_tx: tx.clone(),
             rx,
             lobby_events,
             hub: Arc::clone(hub),
@@ -285,10 +397,23 @@ impl TableActor {
     }
 
     async fn run(mut self) {
-        while let Some(cmd) = self.rx.recv().await {
-            let still_alive = self.handle_cmd(cmd);
-            if !still_alive {
-                break;
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+
+        loop {
+            tokio::select! {
+                maybe_cmd = self.rx.recv() => {
+                    let Some(cmd) = maybe_cmd else {
+                        break;
+                    };
+                    if !self.handle_cmd(cmd) {
+                        break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    self.on_tick_one_sec();
+                }
             }
         }
         self.shutdown_cleanup();
@@ -304,41 +429,61 @@ impl TableActor {
                 let res = self.handle_join(client, role);
                 let _ = reply.send(res);
             }
-            TableCmd::Leave { user_id } => {
-                self.handle_leave(&user_id);
-            }
-            TableCmd::SendChat { user_id, text } => {
-                self.handle_chat(&user_id, &text);
-            }
-            TableCmd::ToggleReady { user_id } => {
-                self.handle_ready(&user_id);
-            }
+            TableCmd::Leave { user_id } => self.handle_leave(&user_id),
+            TableCmd::SendChat { user_id, text } => self.handle_chat(&user_id, &text),
+            TableCmd::ToggleReady { user_id } => self.handle_ready(&user_id),
             TableCmd::UpdateSettings { user_id, settings } => {
                 self.handle_update_settings(&user_id, settings);
             }
-            TableCmd::TakeSeat { user_id, seat } => {
-                self.handle_take_seat(&user_id, seat);
-            }
-            TableCmd::LeaveSeat { user_id } => {
-                self.handle_leave_seat(&user_id);
-            }
-            TableCmd::BootUser { host_id, target_id } => {
-                self.handle_boot(&host_id, &target_id);
-            }
-            TableCmd::AddBot { host_id, level } => {
-                self.handle_add_bot(&host_id, level);
-            }
-            TableCmd::RemoveBot { host_id } => {
-                self.handle_remove_bot(&host_id);
-            }
+            TableCmd::TakeSeat { user_id, seat } => self.handle_take_seat(&user_id, seat),
+            TableCmd::LeaveSeat { user_id } => self.handle_leave_seat(&user_id),
+            TableCmd::BootUser { host_id, target_id } => self.handle_boot(&host_id, &target_id),
+            TableCmd::AddBot { host_id, level } => self.handle_add_bot(&host_id, level),
+            TableCmd::RemoveBot { host_id } => self.handle_remove_bot(&host_id),
             TableCmd::AllowInvite { user_id } => {
                 self.invited_ids.insert(user_id);
             }
             TableCmd::UpdateMemberUser { user, muted } => {
                 self.handle_update_member_user(user, muted);
             }
+            TableCmd::CheckersMove {
+                user_id,
+                turn,
+                path,
+            } => self.handle_checkers_move(&user_id, turn, &path),
+            TableCmd::PoolShoot { user_id, shot } => self.handle_pool_shoot(&user_id, shot),
+            TableCmd::PoolPlaceCue { user_id, x, y } => self.handle_pool_place_cue(&user_id, x, y),
+            TableCmd::Resign { user_id } => self.handle_resign(&user_id),
+            TableCmd::DrawOffer { user_id } => self.handle_draw_offer(&user_id),
+            TableCmd::DrawAnswer { user_id, accept } => self.handle_draw_answer(&user_id, accept),
+            TableCmd::Rematch { user_id } => self.handle_rematch(&user_id),
+            TableCmd::BotDecision { turn, decision } => self.handle_bot_decision(turn, decision),
+            TableCmd::MatchPersisted { finish, outcome } => {
+                self.handle_match_persisted(&finish, &outcome);
+            }
         }
-        self.human_count() > 0
+        self.is_house_bot || self.human_count() > 0
+    }
+
+    fn on_tick_one_sec(&mut self) {
+        if self.phase != TablePhaseDto::Playing {
+            return;
+        }
+        let (snap, finish) = {
+            let Some(game) = self.active_game.as_mut() else {
+                return;
+            };
+            if !game.tick_one_sec() {
+                return;
+            }
+            (game.snapshot_message(self.bot_thinking), game.finish_info())
+        };
+        self.broadcast_table_msg(&snap);
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        } else {
+            self.maybe_schedule_bot_turn();
+        }
     }
 
     fn handle_join(
@@ -348,7 +493,6 @@ impl TableActor {
     ) -> Result<TableSnapshotDto, ErrorCode> {
         let uid = client.user.id.clone();
 
-        // Enforce 5-minute host boot block.
         if let Some(&until) = self.booted_until.get(&uid)
             && Instant::now() < until
         {
@@ -366,16 +510,25 @@ impl TableActor {
             return Err(ErrorCode::NotAllowed);
         }
 
-        // If already present at this table, return a fresh snapshot (reconnect / idempotent join).
         if self.find_human_seat(&uid).is_some() || self.watchers.contains_key(&uid) {
-            return Ok(self.snapshot());
+            let snap = self.snapshot();
+            if let Some(ref game) = self.active_game {
+                let _ = client
+                    .sink
+                    .send_msg(&game.snapshot_message(self.bot_thinking));
+            }
+            return Ok(snap);
         }
 
+        let join_sink = client.sink.clone();
         let new_status = match role {
             TableRoleDto::Player => {
                 let open_idx = self.first_open_seat_index().ok_or(ErrorCode::TableFull)?;
                 if client.user.guest {
                     self.settings.rated = false;
+                }
+                if self.host_id.is_empty() {
+                    self.host_id.clone_from(&uid);
                 }
                 if let Some(slot) = self.seats.get_mut(open_idx) {
                     *slot = Some(SeatOccupant::Human(client));
@@ -397,6 +550,9 @@ impl TableActor {
 
         self.hub.set_user_table(&uid, &self.id);
         let snap = self.snapshot();
+        if let Some(ref game) = self.active_game {
+            let _ = join_sink.send_msg(&game.snapshot_message(self.bot_thinking));
+        }
         self.broadcast_update();
         self.emit_presence(&uid, new_status, Some(self.id.clone()));
         self.emit_summary();
@@ -406,15 +562,24 @@ impl TableActor {
     fn handle_leave(&mut self, user_id: &str) {
         let mut removed = false;
         if let Some(idx) = self.find_human_seat(user_id) {
+            // Leaving mid-game counts as resignation if opponent is still seated.
+            if self.phase == TablePhaseDto::Playing
+                && let Some(game) = self.active_game.as_mut()
+                && game.resign(idx).is_ok()
+                && let Some(finish) = game.finish_info()
+            {
+                let snap = game.snapshot_message(false);
+                self.broadcast_table_msg(&snap);
+                self.on_game_finished(finish);
+            }
             if let Some(slot) = self.seats.get_mut(idx) {
                 *slot = None;
             }
             if let Some(flag) = self.ready.get_mut(idx) {
                 *flag = false;
             }
-            if self.phase == TablePhaseDto::Playing {
-                self.phase = TablePhaseDto::Waiting;
-                self.hub.dec_games();
+            if let Some(flag) = self.rematch_ready.get_mut(idx) {
+                *flag = false;
             }
             removed = true;
         } else if self.watchers.remove(user_id).is_some() {
@@ -428,15 +593,34 @@ impl TableActor {
         self.hub.clear_user_table(user_id, &self.id);
         self.emit_presence(user_id, UserStatusDto::Available, None);
 
-        // Promote a remaining human to host if the host left.
         if self.host_id == user_id {
             self.promote_next_host();
+        }
+
+        if self.human_count() == 0 && self.is_house_bot {
+            self.reset_house_bot_table();
+            return;
         }
 
         if self.human_count() > 0 {
             self.broadcast_update();
             self.emit_summary();
         }
+    }
+
+    fn reset_house_bot_table(&mut self) {
+        if self.phase == TablePhaseDto::Playing {
+            self.hub.dec_games();
+        }
+        self.phase = TablePhaseDto::Waiting;
+        self.active_game = None;
+        self.bot_thinking = false;
+        self.host_id.clear();
+        self.seats = [None, self.house_bot_level.map(SeatOccupant::Bot)];
+        self.ready = [false, self.house_bot_level.is_some()];
+        self.rematch_ready = [false, false];
+        self.chat.clear();
+        self.emit_summary();
     }
 
     fn handle_chat(&mut self, user_id: &str, raw_text: &str) {
@@ -447,14 +631,7 @@ impl TableActor {
         };
         let sink = client.sink.clone();
 
-        if client.muted {
-            let _ = sink.send_msg(&ServerMessage::Error {
-                code: ErrorCode::Muted,
-                re: "chat.send".to_owned(),
-            });
-            return;
-        }
-        if is_watcher && mute_spectators {
+        if client.muted || (is_watcher && mute_spectators) {
             let _ = sink.send_msg(&ServerMessage::Error {
                 code: ErrorCode::Muted,
                 re: "chat.send".to_owned(),
@@ -505,17 +682,443 @@ impl TableActor {
         }
         let both_occupied = self.seats[0].is_some() && self.seats[1].is_some();
         if both_occupied && self.ready == [true, true] {
-            self.phase = TablePhaseDto::Playing;
-            self.turn = 1;
-            self.active_seat = Some(SeatDto::One);
-            self.hub.inc_games();
-            self.push_system_chat("Match ready! Both players confirmed.");
-            for seat in self.seats.iter().flatten() {
-                if let SeatOccupant::Human(c) = seat {
-                    self.emit_presence(&c.user.id, UserStatusDto::Playing, Some(self.id.clone()));
-                }
+            self.start_new_match();
+            return;
+        }
+        self.broadcast_update();
+        self.emit_summary();
+    }
+
+    fn start_new_match(&mut self) {
+        self.phase = TablePhaseDto::Playing;
+        self.rematch_ready = [false, false];
+        self.bot_thinking = false;
+        self.hub.inc_games();
+
+        let swap = self.match_index % 2 == 1;
+        self.match_index = self.match_index.saturating_add(1);
+
+        let engine = match self.game {
+            GameKindDto::Checkers => {
+                let colors = if swap {
+                    [CheckersColor::White, CheckersColor::Black]
+                } else {
+                    [CheckersColor::Black, CheckersColor::White]
+                };
+                ActiveGame::Checkers(ServerCheckersMatch::new(colors, &self.settings))
+            }
+            GameKindDto::Pool => {
+                let breaker = if swap { Seat::Two } else { Seat::One };
+                let seed = self.hub.alloc_seed();
+                ActiveGame::Pool(Box::new(ServerPoolMatch::new(
+                    breaker,
+                    &self.settings,
+                    seed,
+                )))
+            }
+        };
+
+        let initial_snap = engine.snapshot_message(false);
+        self.active_game = Some(engine);
+        self.push_system_chat("Match started!");
+        for occ in self.seats.iter().flatten() {
+            if let SeatOccupant::Human(c) = occ {
+                self.emit_presence(&c.user.id, UserStatusDto::Playing, Some(self.id.clone()));
             }
         }
+        self.broadcast_update();
+        self.broadcast_table_msg(&initial_snap);
+        self.emit_summary();
+        self.maybe_schedule_bot_turn();
+    }
+
+    fn handle_checkers_move(&mut self, user_id: &str, turn: u32, path: &[u8]) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotYourTurn, "checkers.move");
+            return;
+        };
+        if self.phase != TablePhaseDto::Playing {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "checkers.move");
+            return;
+        }
+        let Some(ActiveGame::Checkers(match_state)) = self.active_game.as_mut() else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "checkers.move");
+            return;
+        };
+        if let Err(code) = match_state.apply_move(seat_idx, turn, path) {
+            self.send_error_to(user_id, code, "checkers.move");
+            return;
+        }
+        let finish = match_state.finish_info();
+        let snap = ServerMessage::CheckersSnapshot {
+            state: match_state.to_dto(false),
+        };
+        self.broadcast_table_msg(&snap);
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        } else {
+            self.maybe_schedule_bot_turn();
+        }
+    }
+
+    fn handle_pool_place_cue(&mut self, user_id: &str, x: f64, y: f64) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotYourTurn, "pool.place_cue");
+            return;
+        };
+        if self.phase != TablePhaseDto::Playing {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "pool.place_cue");
+            return;
+        }
+        let Some(ActiveGame::Pool(match_state)) = self.active_game.as_mut() else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "pool.place_cue");
+            return;
+        };
+        if let Err(code) = match_state.place_cue(seat_idx, x, y) {
+            self.send_error_to(user_id, code, "pool.place_cue");
+            return;
+        }
+        let snap = ServerMessage::PoolSnapshot {
+            state: match_state.to_dto(false),
+        };
+        self.broadcast_table_msg(&snap);
+    }
+
+    fn handle_pool_shoot(&mut self, user_id: &str, shot: PoolShotDto) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotYourTurn, "pool.shoot");
+            return;
+        };
+        if self.phase != TablePhaseDto::Playing {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "pool.shoot");
+            return;
+        }
+        let Some(ActiveGame::Pool(match_state)) = self.active_game.as_mut() else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "pool.shoot");
+            return;
+        };
+        let (pre_balls, applied_shot, post_state) = match match_state.shoot(seat_idx, shot) {
+            Ok(res) => res,
+            Err(code) => {
+                self.send_error_to(user_id, code, "pool.shoot");
+                return;
+            }
+        };
+        let finish = match_state.finish_info();
+        self.broadcast_table_msg(&ServerMessage::PoolShot {
+            pre_balls,
+            shot: applied_shot,
+            state: post_state,
+        });
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        } else {
+            self.maybe_schedule_bot_turn();
+        }
+    }
+
+    fn handle_resign(&mut self, user_id: &str) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "resign");
+            return;
+        };
+        if self.phase != TablePhaseDto::Playing {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "resign");
+            return;
+        }
+        let Some(game) = self.active_game.as_mut() else {
+            return;
+        };
+        if let Err(code) = game.resign(seat_idx) {
+            self.send_error_to(user_id, code, "resign");
+            return;
+        }
+        let snap = game.snapshot_message(false);
+        let finish = game.finish_info();
+        self.broadcast_table_msg(&snap);
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        }
+    }
+
+    fn handle_draw_offer(&mut self, user_id: &str) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.offer");
+            return;
+        };
+        let opp_is_bot = self
+            .seats
+            .get(1 - seat_idx)
+            .is_some_and(|s| s.as_ref().is_some_and(SeatOccupant::is_bot));
+        let seat = if seat_idx == 0 { Seat::One } else { Seat::Two };
+        let snap = {
+            let Some(ActiveGame::Checkers(match_state)) = self.active_game.as_mut() else {
+                self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.offer");
+                return;
+            };
+            if let Err(code) = match_state.offer_draw(seat) {
+                self.send_error_to(user_id, code, "draw.offer");
+                return;
+            }
+            if opp_is_bot {
+                let _ = match_state.answer_draw(seat.opponent(), false);
+            }
+            ServerMessage::CheckersSnapshot {
+                state: match_state.to_dto(self.bot_thinking),
+            }
+        };
+        if opp_is_bot {
+            self.push_system_chat("Computer declined the draw offer.");
+        }
+        self.broadcast_table_msg(&snap);
+    }
+
+    fn handle_draw_answer(&mut self, user_id: &str, accept: bool) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.answer");
+            return;
+        };
+        let Some(ActiveGame::Checkers(match_state)) = self.active_game.as_mut() else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.answer");
+            return;
+        };
+        let seat = if seat_idx == 0 { Seat::One } else { Seat::Two };
+        if let Err(code) = match_state.answer_draw(seat, accept) {
+            self.send_error_to(user_id, code, "draw.answer");
+            return;
+        }
+        let finish = match_state.finish_info();
+        let snap = ServerMessage::CheckersSnapshot {
+            state: match_state.to_dto(false),
+        };
+        self.broadcast_table_msg(&snap);
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        }
+    }
+
+    fn handle_rematch(&mut self, user_id: &str) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "rematch");
+            return;
+        };
+        if self.phase != TablePhaseDto::Over {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "rematch");
+            return;
+        }
+        if let Some(flag) = self.rematch_ready.get_mut(seat_idx) {
+            *flag = true;
+        }
+        for (idx, occ) in self.seats.iter().enumerate() {
+            if occ.as_ref().is_some_and(SeatOccupant::is_bot)
+                && let Some(flag) = self.rematch_ready.get_mut(idx)
+            {
+                *flag = true;
+            }
+        }
+        self.broadcast_table_msg(&ServerMessage::RematchState {
+            ready: self.rematch_ready,
+        });
+        if self.seats[0].is_some() && self.seats[1].is_some() && self.rematch_ready == [true, true]
+        {
+            self.start_new_match();
+        }
+    }
+
+    fn maybe_schedule_bot_turn(&mut self) {
+        if self.phase != TablePhaseDto::Playing || self.bot_thinking {
+            return;
+        }
+        let Some(game) = self.active_game.as_ref() else {
+            return;
+        };
+        let active_idx = game.active_seat_index();
+        let Some(level) = self
+            .seats
+            .get(active_idx)
+            .and_then(|slot| slot.as_ref())
+            .and_then(SeatOccupant::bot_level)
+        else {
+            return;
+        };
+
+        self.bot_thinking = true;
+        let turn = game.turn_number();
+        let seed = self.hub.alloc_seed();
+        let req = match game {
+            ActiveGame::Checkers(m) => BotWorkRequest::Checkers {
+                board: *m.game.board(),
+                level,
+                seed,
+            },
+            ActiveGame::Pool(m) => BotWorkRequest::Pool {
+                game: Box::new(m.game.clone()),
+                level,
+                seed,
+            },
+        };
+        spawn_bot_turn(self.hub.bot_semaphore(), self.self_tx.clone(), turn, req);
+    }
+
+    fn handle_bot_decision(&mut self, turn: u32, decision: BotDecision) {
+        self.bot_thinking = false;
+        if self.phase != TablePhaseDto::Playing {
+            return;
+        }
+        let Some(game) = self.active_game.as_mut() else {
+            return;
+        };
+        if game.turn_number() != turn {
+            return;
+        }
+        let active_idx = game.active_seat_index();
+        let is_bot_seat = self
+            .seats
+            .get(active_idx)
+            .and_then(|s| s.as_ref())
+            .is_some_and(SeatOccupant::is_bot);
+        if !is_bot_seat {
+            return;
+        }
+
+        let finish = match (game, decision) {
+            (ActiveGame::Checkers(m), BotDecision::CheckersMove(path)) => {
+                if m.apply_move(active_idx, turn, &path).is_err() {
+                    return;
+                }
+                let snap = ServerMessage::CheckersSnapshot {
+                    state: m.to_dto(false),
+                };
+                let info = m.finish_info();
+                self.broadcast_table_msg(&snap);
+                info
+            }
+            (ActiveGame::Pool(m), BotDecision::PoolShot(shot)) => {
+                let Ok((pre_balls, applied, post_state)) = m.shoot(active_idx, shot) else {
+                    return;
+                };
+                let info = m.finish_info();
+                self.broadcast_table_msg(&ServerMessage::PoolShot {
+                    pre_balls,
+                    shot: applied,
+                    state: post_state,
+                });
+                info
+            }
+            _ => return,
+        };
+
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        } else {
+            self.maybe_schedule_bot_turn();
+        }
+    }
+
+    fn on_game_finished(&mut self, finish: MatchFinishInfo) {
+        if self.phase != TablePhaseDto::Playing {
+            return;
+        }
+        self.phase = TablePhaseDto::Over;
+        self.bot_thinking = false;
+        self.rematch_ready = [false, false];
+        self.hub.dec_games();
+
+        for occ in self.seats.iter().flatten() {
+            if let SeatOccupant::Human(c) = occ {
+                self.emit_presence(&c.user.id, UserStatusDto::Waiting, Some(self.id.clone()));
+            }
+        }
+        self.broadcast_update();
+        self.emit_summary();
+
+        let bot_level = self
+            .seats
+            .iter()
+            .flatten()
+            .find_map(SeatOccupant::bot_level)
+            .map(bot_level_to_db);
+
+        let p1_id = self.seats[0]
+            .as_ref()
+            .and_then(|s| parse_user_id(&s.wire_id()));
+        let p2_id = self.seats[1]
+            .as_ref()
+            .and_then(|s| parse_user_id(&s.wire_id()));
+        let p1_label = self.seats[0]
+            .as_ref()
+            .map_or_else(|| "Player 1".to_owned(), SeatOccupant::label);
+        let p2_label = self.seats[1]
+            .as_ref()
+            .map_or_else(|| "Player 2".to_owned(), SeatOccupant::label);
+
+        let input = RecordMatchInput {
+            game: game_kind_from_dto(self.game),
+            player1_id: p1_id,
+            player2_id: p2_id,
+            player1_label: p1_label,
+            player2_label: p2_label,
+            bot_level,
+            winner: finish.winner,
+            reason: finish.reason.clone(),
+            rated_requested: self.settings.rated,
+            activity_count: finish.activity_count,
+        };
+
+        let repo = self.hub.matches_repo();
+        let tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let outcome = repo.record_finished_match(input).await.unwrap_or_default();
+            let _ = tx.send(TableCmd::MatchPersisted { finish, outcome }).await;
+        });
+    }
+
+    fn handle_match_persisted(&mut self, finish: &MatchFinishInfo, outcome: &RecordMatchOutcome) {
+        let mut rating_dtos = Vec::with_capacity(outcome.rating_changes.len());
+        for rc in &outcome.rating_changes {
+            let wire_id = format_user_id(rc.user_id);
+            rating_dtos.push(RatingChangeDto {
+                id: wire_id.clone(),
+                old: rc.old_rating,
+                new: rc.new_rating,
+            });
+            let prov = is_provisional(rc.new_rated_games);
+            let mut display_name = wire_id.clone();
+            for occ in self.seats.iter_mut().flatten() {
+                if let SeatOccupant::Human(c) = occ
+                    && c.user.id == wire_id
+                {
+                    c.user.rating = rc.new_rating;
+                    c.user.prov = prov;
+                    display_name.clone_from(&c.user.name);
+                }
+            }
+            self.push_system_chat(&format!(
+                "{display_name}'s old rating: {}; new rating: {}",
+                rc.old_rating, rc.new_rating
+            ));
+            let _ = self.lobby_events.try_send(LobbyEvent::UserRatingUpdated {
+                user_id: wire_id,
+                rating: rc.new_rating,
+                prov,
+            });
+        }
+
+        let win_dtos: Vec<WinCountDto> = outcome
+            .win_counts
+            .iter()
+            .map(|w| WinCountDto {
+                id: format_user_id(w.user_id),
+                wins: w.wins,
+            })
+            .collect();
+
+        self.broadcast_table_msg(&ServerMessage::GameOver(Box::new(GameOverDto {
+            winner: finish.winner_seat,
+            reason: finish.reason.clone(),
+            rating: rating_dtos,
+            wins: win_dtos,
+        })));
         self.broadcast_update();
         self.emit_summary();
     }
@@ -529,15 +1132,15 @@ impl TableActor {
             self.send_error_to(user_id, ErrorCode::NotAllowed, "settings.set");
             return;
         }
-        let has_guest_or_bot = self.seats.iter().flatten().any(|occ| match occ {
-            SeatOccupant::Bot(_) => true,
-            SeatOccupant::Human(c) => c.user.guest,
-        });
+        let has_guest_or_bot = self.is_house_bot
+            || self.seats.iter().flatten().any(|occ| match occ {
+                SeatOccupant::Bot(_) => true,
+                SeatOccupant::Human(c) => c.user.guest,
+            });
         if has_guest_or_bot {
             settings.rated = false;
         }
         self.settings = settings;
-        // Require humans to re-confirm Ready after host changes settings.
         for (idx, occ) in self.seats.iter().enumerate() {
             if let Some(flag) = self.ready.get_mut(idx) {
                 *flag = matches!(occ, Some(SeatOccupant::Bot(_)));
@@ -585,15 +1188,19 @@ impl TableActor {
             self.send_error_to(user_id, ErrorCode::NotAllowed, "seat.leave");
             return;
         };
+        if self.phase == TablePhaseDto::Playing
+            && let Some(game) = self.active_game.as_mut()
+            && game.resign(idx).is_ok()
+            && let Some(finish) = game.finish_info()
+        {
+            let snap = game.snapshot_message(false);
+            self.broadcast_table_msg(&snap);
+            self.on_game_finished(finish);
+        }
         let taken = self.seats.get_mut(idx).and_then(Option::take);
         if let Some(SeatOccupant::Human(client)) = taken {
             if let Some(flag) = self.ready.get_mut(idx) {
                 *flag = false;
-            }
-            if self.phase == TablePhaseDto::Playing {
-                self.phase = TablePhaseDto::Waiting;
-                self.hub.dec_games();
-                self.push_system_chat(&format!("{} stood up and resigned.", client.user.name));
             }
             self.watchers.insert(user_id.to_owned(), client);
             self.emit_presence(user_id, UserStatusDto::Watching, Some(self.id.clone()));
@@ -672,7 +1279,7 @@ impl TableActor {
             self.send_error_to(host_id, ErrorCode::NotHost, "bot.remove");
             return;
         }
-        if self.phase != TablePhaseDto::Waiting {
+        if self.phase != TablePhaseDto::Waiting || self.is_house_bot {
             self.send_error_to(host_id, ErrorCode::NotAllowed, "bot.remove");
             return;
         }
@@ -730,6 +1337,8 @@ impl TableActor {
         }
         if let Some(watcher) = self.watchers.values().next() {
             self.host_id = watcher.user.id.clone();
+        } else {
+            self.host_id.clear();
         }
     }
 
@@ -776,6 +1385,17 @@ impl TableActor {
     }
 
     fn snapshot(&self) -> TableSnapshotDto {
+        let (turn, active_seat, ms_left) = self.active_game.as_ref().map_or_else(
+            || (0, None, u64::from(self.settings.timer) * 1_000),
+            |g| {
+                let seat = if g.active_seat_index() == 0 {
+                    Seat::One
+                } else {
+                    Seat::Two
+                };
+                (g.turn_number(), Some(seat_to_dto(seat)), g.ms_left())
+            },
+        );
         TableSnapshotDto {
             id: self.id.clone(),
             no: self.no,
@@ -791,9 +1411,9 @@ impl TableActor {
             watchers: self.watcher_dtos(),
             phase: self.phase,
             chat: self.chat.iter().cloned().collect(),
-            turn: self.turn,
-            active_seat: self.active_seat,
-            ms_left: u64::from(self.settings.timer) * 1_000,
+            turn,
+            active_seat,
+            ms_left,
         }
     }
 
@@ -811,6 +1431,11 @@ impl TableActor {
         list
     }
 
+    fn broadcast_table_msg(&self, msg: &ServerMessage) {
+        let sinks = self.all_sinks();
+        broadcast_msg(sinks.iter(), msg);
+    }
+
     fn broadcast_update(&self) {
         let msg = ServerMessage::TableUpdate(Box::new(TableUpdateDto {
             id: self.id.clone(),
@@ -824,8 +1449,7 @@ impl TableActor {
             watchers: self.watcher_dtos(),
             phase: self.phase,
         }));
-        let sinks = self.all_sinks();
-        broadcast_msg(sinks.iter(), &msg);
+        self.broadcast_table_msg(&msg);
     }
 
     fn push_system_chat(&mut self, text: &str) {
@@ -847,8 +1471,7 @@ impl TableActor {
             scope: ChatScopeDto::Table,
             line,
         };
-        let sinks = self.all_sinks();
-        broadcast_msg(sinks.iter(), &msg);
+        self.broadcast_table_msg(&msg);
     }
 
     fn emit_summary(&self) {

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::auth::{HighscoreRowDto, ProfileGameStatDto, ProfileMatchDto, RoomSummaryDto, UserDto};
 use crate::checkers::{CheckersSettingsDto, CheckersStateDto};
 use crate::lobby::{
-    ChatLineDto, ChatScopeDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto, TableRoleDto,
-    TableSettingsDto, TableSnapshotDto, TableSummaryDto, TableUpdateDto,
+    ChatLineDto, ChatScopeDto, GameOverDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto,
+    TableRoleDto, TableSettingsDto, TableSnapshotDto, TableSummaryDto, TableUpdateDto,
 };
 use crate::pool::{PoolBallDto, PoolSettingsDto, PoolShotDto, PoolStateDto};
 
@@ -478,6 +478,15 @@ pub enum ServerMessage {
     Kicked {
         /// Kick reason.
         reason: KickReasonDto,
+    },
+    /// Authoritative match-over broadcast with Elo deltas and High Score updates.
+    #[serde(rename = "game.over")]
+    GameOver(Box<GameOverDto>),
+    /// Post-match rematch confirmation flags for Seat 1 and Seat 2.
+    #[serde(rename = "rematch.state")]
+    RematchState {
+        /// Ready-for-rematch flags per seat.
+        ready: [bool; 2],
     },
     /// Current offline session summary.
     #[serde(rename = "session.state")]

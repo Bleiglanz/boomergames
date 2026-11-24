@@ -333,14 +333,14 @@ disallowed-methods = [
 
 ### Milestone 6 — Authoritative Multiplayer Games, House Bots, Elo & High Scores
 
-- [ ] **6.1 Authoritative Turn Loop (`TableActor` + `boomer-domain`):**
+- [x] **6.1 Authoritative Turn Loop (`TableActor` + `boomer-domain`):**
   - Match lifecycle (`WAITING → READY → IN_PROGRESS → GAME_OVER → Rematch|WAITING`).
   - Strict turn validation (rejects out-of-turn, stale-turn, or spectator moves).
-  - Pool authoritative sim on server → broadcast `{ action, result }` → clients replay identical WASM sim and snap to `result.balls`.
-- [ ] **6.2 House Bots & On-Demand Bots:**
-  - Always-open 🤖 House Bot tables (2–3 per room) and host `bot.add`/`bot.remove`.
-  - Bot AI runs `boomer-domain` search to completion on a bounded `spawn_blocking` worker pool so actor tasks never stall.
-- [ ] **6.3 Ratings & High Scores (`boomer-domain::rating` + `sqlx`):**
+  - Pool authoritative sim on server → broadcast `{ preBalls, shot, state }` → clients replay identical WASM sim (with `serde_json/float_roundtrip` for 0-ULP JSON parity) and snap to `state.balls`.
+- [x] **6.2 House Bots & On-Demand Bots:**
+  - Always-open 🤖 House Bot tables (3 per room: Easy, Medium, Hard) and host `bot.add`/`bot.remove`.
+  - Bot AI runs `boomer-domain` search to completion on a bounded `spawn_blocking` worker pool (`Semaphore`) so actor tasks never stall.
+- [x] **6.3 Ratings & High Scores (`boomer-domain::rating` + `sqlx`):**
   - Per-game Elo starting at `1200`, provisional `?` under 10 rated games, tier badges, anti-farming rating decay.
   - Win-count High Score table (human wins only, max 5 wins/day/opponent, min move/shot threshold, tie-broken by `wins_reached_at`, Top 100 + *"Find me"*).
   - Single atomic DB transaction per finished match recording `matches` and upserting `player_stats`; profile shows W/L/D and last 20 matches.

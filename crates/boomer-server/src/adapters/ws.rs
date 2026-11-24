@@ -549,6 +549,81 @@ async fn handle_table_scoped_message(
             )
             .await
         }
+        other => handle_game_action_message(other, uid, session, state).await,
+    }
+}
+
+async fn handle_game_action_message(
+    msg: ClientMessage,
+    uid: String,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    match msg {
+        ClientMessage::CheckersMove { turn, path } => {
+            send_table_cmd(
+                session,
+                state,
+                "checkers.move",
+                TableCmd::CheckersMove {
+                    user_id: uid,
+                    turn,
+                    path,
+                },
+            )
+            .await
+        }
+        ClientMessage::PoolShoot { shot } => {
+            send_table_cmd(
+                session,
+                state,
+                "pool.shoot",
+                TableCmd::PoolShoot { user_id: uid, shot },
+            )
+            .await
+        }
+        ClientMessage::PoolPlaceCue { x, y } => {
+            send_table_cmd(
+                session,
+                state,
+                "pool.place_cue",
+                TableCmd::PoolPlaceCue { user_id: uid, x, y },
+            )
+            .await
+        }
+        ClientMessage::Resign {} => {
+            send_table_cmd(session, state, "resign", TableCmd::Resign { user_id: uid }).await
+        }
+        ClientMessage::DrawOffer {} => {
+            send_table_cmd(
+                session,
+                state,
+                "draw.offer",
+                TableCmd::DrawOffer { user_id: uid },
+            )
+            .await
+        }
+        ClientMessage::DrawAnswer { accept } => {
+            send_table_cmd(
+                session,
+                state,
+                "draw.answer",
+                TableCmd::DrawAnswer {
+                    user_id: uid,
+                    accept,
+                },
+            )
+            .await
+        }
+        ClientMessage::Rematch {} => {
+            send_table_cmd(
+                session,
+                state,
+                "rematch",
+                TableCmd::Rematch { user_id: uid },
+            )
+            .await
+        }
         ClientMessage::Hello { .. } => session.send_error(ErrorCode::NotAllowed, "hello"),
         _ => session.send_error(ErrorCode::NotAllowed, "unsupported"),
     }

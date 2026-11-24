@@ -77,6 +77,15 @@ pub enum LobbyEvent {
         /// Active table ID, if any.
         table_id: Option<String>,
     },
+    /// Member Elo rating updated after a rated match finished.
+    UserRatingUpdated {
+        /// Affected user wire ID.
+        user_id: String,
+        /// New per-game Elo rating.
+        rating: i32,
+        /// Updated provisional flag.
+        prov: bool,
+    },
 }
 
 /// Downward commands processed by a [`LobbyActor`].
@@ -208,7 +217,7 @@ impl LobbyActor {
             game,
             cmd_tx,
         };
-        let actor = Self {
+        let mut actor = Self {
             room_id,
             game,
             capacity,
@@ -222,8 +231,39 @@ impl LobbyActor {
             event_rx,
             hub,
         };
+        actor.spawn_house_bot_tables();
         tokio::spawn(actor.run());
         handle
+    }
+
+    fn spawn_house_bot_tables(&mut self) {
+        for level in [BotLevelDto::Easy, BotLevelDto::Medium, BotLevelDto::Hard] {
+            let no = self.hub.alloc_table_no();
+            let id = format!("t{no}");
+            let settings = TableSettingsDto {
+                visibility: TableVisibilityDto::Public,
+                rated: false,
+                timer: 30,
+                mute_spectators: false,
+                opts: boomer_protocol::TableGameOptsDto::default(),
+            };
+            let (_handle, summary, _snap) = TableActor::spawn(
+                TableInit {
+                    id: id.clone(),
+                    no,
+                    room_id: self.room_id.clone(),
+                    game: self.game,
+                    settings,
+                    host: None,
+                    second_human: None,
+                    second_bot: Some(level),
+                    is_house_bot: true,
+                },
+                self.event_tx.clone(),
+                &self.hub,
+            );
+            self.tables.insert(id, summary);
+        }
     }
 
     async fn run(mut self) {
@@ -303,6 +343,18 @@ impl LobbyActor {
                 if let Some(member) = self.members.get_mut(&user_id) {
                     member.user.status = status;
                     member.active_table = table_id;
+                    let dto = member.user.clone();
+                    self.broadcast_all(&ServerMessage::UserUpdate(dto));
+                }
+            }
+            LobbyEvent::UserRatingUpdated {
+                user_id,
+                rating,
+                prov,
+            } => {
+                if let Some(member) = self.members.get_mut(&user_id) {
+                    member.user.rating = rating;
+                    member.user.prov = prov;
                     let dto = member.user.clone();
                     self.broadcast_all(&ServerMessage::UserUpdate(dto));
                 }
@@ -749,9 +801,10 @@ impl LobbyActor {
                 room_id: self.room_id.clone(),
                 game: self.game,
                 settings,
-                host,
+                host: Some(host),
                 second_human,
                 second_bot,
+                is_house_bot: false,
             },
             self.event_tx.clone(),
             &self.hub,

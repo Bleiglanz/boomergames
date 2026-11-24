@@ -8,6 +8,7 @@
 //!   into each connection's bounded [`ClientSink`]. If a slow client's buffer overflows, its
 //!   `slow_disconnect` flag is tripped and its socket disconnects cleanly without stalling any actor.
 
+pub mod game_session;
 pub mod hub;
 pub mod lobby_actor;
 pub mod table_actor;

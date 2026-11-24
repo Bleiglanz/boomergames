@@ -790,7 +790,9 @@ impl<T: GameTransport> ClientApp<T> {
                 | ServerMessage::PlayNowTimeout { .. }
                 | ServerMessage::TableSnapshot(_)
                 | ServerMessage::TableUpdate(_)
-                | ServerMessage::Kicked { .. } => {
+                | ServerMessage::Kicked { .. }
+                | ServerMessage::GameOver(_)
+                | ServerMessage::RematchState { .. } => {
                     // Handled by the Step 2 online lounge session controller.
                     self.dirty = true;
                 }

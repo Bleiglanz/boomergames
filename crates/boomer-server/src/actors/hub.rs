@@ -1,20 +1,26 @@
-//! Acyclic registry of live lounge rooms, active tables, and online client sinks.
+//! Acyclic registry of live lounge rooms, active tables, online client sinks,
+//! bounded bot AI worker semaphore, and match persistence handle.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use boomer_protocol::{GameKindDto, RoomSummaryDto, ServerMessage};
+use tokio::sync::Semaphore;
 
 use crate::actors::lobby_actor::{LobbyActor, LobbyHandle};
 use crate::actors::table_actor::TableHandle;
 use crate::actors::{ClientSink, broadcast_msg};
+use crate::ports::MatchRepo;
 
 /// Default soft capacity per lounge room (`incubation/plan.md` §5.3).
 pub const DEFAULT_ROOM_CAPACITY: usize = 100;
 
 /// Default occupancy threshold (70% of 100 users) triggering automatic room overflow.
 pub const DEFAULT_AUTO_OPEN_THRESHOLD: u32 = 70;
+
+/// Maximum concurrent blocking AI searches across all tables (`spawn_blocking` worker cap).
+const BOT_WORKER_PERMITS: usize = 4;
 
 struct RoomEntry {
     summary: RoomSummaryDto,
@@ -34,9 +40,12 @@ pub struct LobbyHub {
     auto_open_threshold: u32,
     next_table_no: AtomicU32,
     next_invite_id: AtomicU64,
+    next_rng_seed: AtomicU64,
     online: Arc<AtomicU32>,
     tables_count: Arc<AtomicU32>,
     games_count: Arc<AtomicU32>,
+    matches: Arc<dyn MatchRepo>,
+    bot_semaphore: Arc<Semaphore>,
 }
 
 impl LobbyHub {
@@ -46,11 +55,13 @@ impl LobbyHub {
         online: Arc<AtomicU32>,
         tables_count: Arc<AtomicU32>,
         games_count: Arc<AtomicU32>,
+        matches: Arc<dyn MatchRepo>,
     ) -> Arc<Self> {
         Self::with_limits(
             online,
             tables_count,
             games_count,
+            matches,
             DEFAULT_ROOM_CAPACITY,
             DEFAULT_AUTO_OPEN_THRESHOLD,
         )
@@ -62,6 +73,7 @@ impl LobbyHub {
         online: Arc<AtomicU32>,
         tables_count: Arc<AtomicU32>,
         games_count: Arc<AtomicU32>,
+        matches: Arc<dyn MatchRepo>,
         room_capacity: usize,
         auto_open_threshold: u32,
     ) -> Arc<Self> {
@@ -74,14 +86,36 @@ impl LobbyHub {
             auto_open_threshold,
             next_table_no: AtomicU32::new(1),
             next_invite_id: AtomicU64::new(1),
+            next_rng_seed: AtomicU64::new(0x00B0_0E42_0000_0001),
             online,
             tables_count,
             games_count,
+            matches,
+            bot_semaphore: Arc::new(Semaphore::new(BOT_WORKER_PERMITS)),
         });
 
         hub.open_next_room(GameKindDto::Pool);
         hub.open_next_room(GameKindDto::Checkers);
         hub
+    }
+
+    /// Returns the shared [`MatchRepo`] handle for atomic post-match persistence.
+    #[must_use]
+    pub fn matches_repo(&self) -> Arc<dyn MatchRepo> {
+        Arc::clone(&self.matches)
+    }
+
+    /// Returns the bounded semaphore limiting concurrent blocking bot AI jobs.
+    #[must_use]
+    pub fn bot_semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.bot_semaphore)
+    }
+
+    /// Allocates a deterministic non-zero seed for racks and bot AI searches.
+    #[must_use]
+    pub fn alloc_seed(&self) -> u64 {
+        self.next_rng_seed
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
     }
 
     /// Registers an active WebSocket connection's sink for global `rooms.update` broadcasts.

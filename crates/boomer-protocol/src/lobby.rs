@@ -260,3 +260,42 @@ pub struct TableUpdateDto {
     /// Lifecycle phase.
     pub phase: TablePhaseDto,
 }
+
+/// Per-player Elo change included in `game.over` after a rated match.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RatingChangeDto {
+    /// User wire ID (`"u123"`).
+    pub id: String,
+    /// Rating before the match.
+    pub old: i32,
+    /// Rating after the match.
+    pub new: i32,
+}
+
+/// Updated High Score win count included in `game.over`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WinCountDto {
+    /// User wire ID (`"u123"`).
+    pub id: String,
+    /// Cumulative counted human wins for this game.
+    pub wins: u32,
+}
+
+/// Authoritative match completion summary (`game.over` per `incubation/plan.md` §9.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameOverDto {
+    /// Winning seat (`None` for draw).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub winner: Option<SeatDto>,
+    /// Machine-readable finish reason (`"no_moves"`, `"eight_ball_pocketed"`, `"resign"`, `"timeout"`, `"agreement"`, ...).
+    pub reason: String,
+    /// Elo rating changes (present for rated human-vs-human matches).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rating: Vec<RatingChangeDto>,
+    /// Updated human-win counts (present when the match counted for High Scores).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wins: Vec<WinCountDto>,
+}

@@ -343,7 +343,8 @@ async fn table_stand_up_bot_add_ready_and_status_metrics() {
         .json()
         .await
         .unwrap();
-    assert_eq!(status["tables"], 1);
+    // 6 always-open House Bot tables (3 per room) + 1 human table = 7 total tables, 1 running game.
+    assert_eq!(status["tables"], 7);
     assert_eq!(status["games"], 1);
 }
 

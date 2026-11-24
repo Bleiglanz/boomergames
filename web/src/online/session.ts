@@ -604,6 +604,25 @@ export class OnlineSession {
           d.reason === "booted" ? "booted_from_table" : "table_closed";
         break;
       }
+      case "game.over": {
+        if (this.state.activeTable !== null) {
+          this.state.activeTable = {
+            ...this.state.activeTable,
+            phase: "over",
+          };
+        }
+        break;
+      }
+      case "rematch.state": {
+        if (this.state.activeTable !== null && Array.isArray(d.ready)) {
+          const r = d.ready as [boolean, boolean];
+          this.state.activeTable = {
+            ...this.state.activeTable,
+            ready: [Boolean(r[0]), Boolean(r[1])],
+          };
+        }
+        break;
+      }
       case "invite.received": {
         const inv = d as unknown as PendingInviteView;
         this.state.pendingInvites = [
