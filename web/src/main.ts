@@ -2,23 +2,32 @@ import "./styles/classic.css";
 
 import { SoundSynth } from "./audio/synth.js";
 import { getStrings, type Strings } from "./i18n/strings.js";
-import { OnlineSession, parseHashIntent } from "./online/session.js";
+import {
+  OnlineSession,
+  parseHashIntent,
+  type ChatLineDto,
+  type TableSnapshotDto,
+} from "./online/session.js";
 import { loadPrefs, savePrefs, type UserPrefs } from "./prefs.js";
 import { StageRenderer } from "./render/renderer.js";
 import { LobbyController } from "./ui/lobby.js";
 import {
+  RemoteWasmBridge,
   WasmBridge,
   type AimAidLevelDto,
   type CheckersColorDto,
   type CheckersOutcomeDto,
   type CheckersSettingsDto,
   type CheckersView,
+  type GameBridge,
   type GameKindDto,
   type LocalModeDto,
   type PoolFoulDto,
   type PoolOutcomeDto,
   type PoolSettingsDto,
   type PoolView,
+  type RemoteRole,
+  type SeatDto,
   type UiInput,
   type ViewModel,
 } from "./wasm_bridge.js";
@@ -67,7 +76,32 @@ function formatClock(ms: number): string {
   return `${String(min).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
-function formatSeatName(seatIndex: 0 | 1, mode: LocalModeDto, s: Strings): string {
+function canActForSeat(role: RemoteRole, activeSeat: SeatDto): boolean {
+  if (role === "offline") {
+    return true;
+  }
+  if (role === "seat1") {
+    return activeSeat === "1";
+  }
+  if (role === "seat2") {
+    return activeSeat === "2";
+  }
+  return false;
+}
+
+function formatSeatName(
+  seatIndex: 0 | 1,
+  mode: LocalModeDto,
+  s: Strings,
+  onlineTable: TableSnapshotDto | null = null,
+): string {
+  if (onlineTable !== null) {
+    const occ = onlineTable.seats[seatIndex];
+    if (occ !== null) {
+      return `${occ.bot ? "🤖 " : ""}${occ.name}`;
+    }
+    return `${s.loungeSeat} ${seatIndex + 1}`;
+  }
   if (seatIndex === 0) {
     return s.player1;
   }
@@ -82,10 +116,11 @@ function formatCheckersOutcome(
   outcome: CheckersOutcomeDto,
   mode: LocalModeDto,
   s: Strings,
+  onlineTable: TableSnapshotDto | null = null,
 ): string {
   if (outcome.kind === "win") {
     const winnerSeatIdx: 0 | 1 = outcome.winner_seat === "1" ? 0 : 1;
-    const winnerLabel = `${formatSeatName(winnerSeatIdx, mode, s)} (${formatColorName(outcome.winner, s)})`;
+    const winnerLabel = `${formatSeatName(winnerSeatIdx, mode, s, onlineTable)} (${formatColorName(outcome.winner, s)})`;
     switch (outcome.reason) {
       case "no_moves":
         return `${winnerLabel} ${s.outcomeWinNoMoves}`;
@@ -105,9 +140,14 @@ function formatCheckersOutcome(
   }
 }
 
-function formatPoolOutcome(outcome: PoolOutcomeDto, mode: LocalModeDto, s: Strings): string {
+function formatPoolOutcome(
+  outcome: PoolOutcomeDto,
+  mode: LocalModeDto,
+  s: Strings,
+  onlineTable: TableSnapshotDto | null = null,
+): string {
   const idx: 0 | 1 = outcome.winnerSeat === "1" ? 0 : 1;
-  const winner = formatSeatName(idx, mode, s);
+  const winner = formatSeatName(idx, mode, s, onlineTable);
   switch (outcome.reason) {
     case "eight_ball_pocketed":
       return `${winner} ${s.poolWinEight}`;
@@ -182,6 +222,7 @@ interface PoolSideControls {
   readonly shootBtn: HTMLButtonElement;
   readonly aimLabel: HTMLLabelElement;
   readonly aimRange: HTMLInputElement;
+  readonly aidGroup: HTMLElement;
   readonly aidSelect: HTMLSelectElement;
   readonly timerGroup: HTMLElement;
   readonly timerSelect: HTMLSelectElement;
@@ -200,14 +241,25 @@ interface PoolWidgets {
   readonly sideControls: PoolSideControls;
 }
 
+interface InlineTableChat {
+  readonly log: HTMLElement;
+  lastKey: string;
+}
+
 interface MountedShell {
   readonly game: GameKindDto;
   readonly stage: StageRenderer;
   readonly canvasHost: HTMLElement;
   readonly bannerHost: HTMLElement;
   readonly playersHost: HTMLElement;
-  readonly sidePanelHost: HTMLElement;
+  readonly sideControlsHost: HTMLElement;
   readonly poolWidgets: PoolWidgets | null;
+  readonly inlineChat: InlineTableChat | null;
+}
+
+interface ActiveOnlineMatch {
+  readonly table: TableSnapshotDto;
+  readonly role: Exclude<RemoteRole, "offline">;
 }
 
 async function bootstrap(): Promise<void> {
@@ -237,6 +289,8 @@ async function bootstrap(): Promise<void> {
   const initialIntent = parseHashIntent();
   let onlineView =
     initialIntent.loginToken !== undefined || initialIntent.tableId !== undefined;
+  let remoteBridge: RemoteWasmBridge | null = null;
+  let remoteKey = "";
   let lobbyController: LobbyController | null = null;
   let mountedShell: MountedShell | null = null;
   let lastScreenKey = "";
@@ -244,8 +298,86 @@ async function bootstrap(): Promise<void> {
   let contrastBtnRef: HTMLButtonElement | null = null;
   let lastAnnouncement = "";
 
+  const currentOnlineMatch = (): ActiveOnlineMatch | null => {
+    if (!onlineView) {
+      return null;
+    }
+    const table = onlineSession.state.activeTable;
+    if (table === null || (table.phase !== "playing" && table.phase !== "over")) {
+      return null;
+    }
+    const me = onlineSession.state.me;
+    let role: Exclude<RemoteRole, "offline"> = "spectator";
+    if (me !== null) {
+      if (table.seats[0]?.id === me.id) {
+        role = "seat1";
+      } else if (table.seats[1]?.id === me.id) {
+        role = "seat2";
+      }
+    }
+    return { table, role };
+  };
+
+  const activeBridge = (): GameBridge => remoteBridge ?? bridge;
+
+  const syncRemoteBridge = (): boolean => {
+    const match = currentOnlineMatch();
+    if (match === null) {
+      if (remoteBridge !== null) {
+        remoteBridge.dispose();
+        remoteBridge = null;
+        remoteKey = "";
+        return true;
+      }
+      return false;
+    }
+    const key = `${match.table.id}:${match.table.game}:${match.role}`;
+    if (key !== remoteKey || remoteBridge === null) {
+      if (remoteBridge !== null) {
+        remoteBridge.dispose();
+      }
+      remoteBridge = new RemoteWasmBridge(match.table.game, match.role);
+      remoteKey = key;
+      const baseVm = bridge.viewModel();
+      if (baseVm.lang !== "en") {
+        remoteBridge.dispatch({ kind: "set_language", lang: baseVm.lang === "de" ? "de" : "en" });
+      }
+      if (baseVm.highContrast) {
+        remoteBridge.dispatch({ kind: "toggle_high_contrast" });
+      }
+      if (prefs.checkersShowNumbers) {
+        remoteBridge.dispatch({ kind: "checkers_toggle_square_numbers" });
+      }
+      if (onlineSession.latestGameFrameJson !== null) {
+        remoteBridge.pushServerMessage(onlineSession.latestGameFrameJson);
+      }
+      remoteBridge.drainSoundCues();
+      return true;
+    }
+    return false;
+  };
+
+  onlineSession.subscribe(() => {
+    const bridgeChanged = syncRemoteBridge();
+    if (onlineView && (bridgeChanged || currentOnlineMatch() !== null || mountedShell !== null)) {
+      renderApp();
+    }
+  });
+
+  onlineSession.subscribeGameFrames((rawJson) => {
+    syncRemoteBridge();
+    if (remoteBridge !== null) {
+      const changed = remoteBridge.pushServerMessage(rawJson);
+      synth.playAll(remoteBridge.drainSoundCues());
+      if (changed) {
+        renderApp();
+      }
+    }
+  });
+
   const openOnlineLounge = (intent?: { readonly loginToken?: string; readonly tableId?: string }): void => {
     onlineView = true;
+    syncRemoteBridge();
     renderApp();
     void onlineSession.probeBackend().then((available) => {
       if (available) {
@@ -285,11 +417,29 @@ async function bootstrap(): Promise<void> {
 
   const dispatchAndRender = (input: UiInput): void => {
     synth.unlock();
-    const changed = bridge.dispatch(input);
-    synth.playAll(bridge.drainSoundCues());
+    const isSharedPref =
+      input.kind === "toggle_high_contrast" ||
+      input.kind === "set_language" ||
+      input.kind === "checkers_toggle_square_numbers";
+
+    let changed = false;
+    if (remoteBridge !== null) {
+      if (isSharedPref) {
+        bridge.dispatch(input);
+      }
+      changed = remoteBridge.dispatch(input);
+      for (const rawMsg of remoteBridge.drainClientMessages()) {
+        onlineSession.sendRawJson(rawMsg);
+      }
+      synth.playAll(remoteBridge.drainSoundCues());
+    } else {
+      changed = bridge.dispatch(input);
+      synth.playAll(bridge.drainSoundCues());
+    }
+
     if (changed) {
       renderApp();
-      persistFromVm(bridge.viewModel());
+      persistFromVm(activeBridge().viewModel());
     }
   };
 
@@ -305,19 +455,26 @@ async function bootstrap(): Promise<void> {
   };
 
   const renderApp = (): void => {
-    const vm: ViewModel = bridge.viewModel();
+    const onlineMatch = currentOnlineMatch();
+    const vm: ViewModel =
+      onlineMatch !== null && remoteBridge !== null
+        ? remoteBridge.viewModel()
+        : bridge.viewModel();
     const s = getStrings(vm.lang);
     document.documentElement.lang = vm.lang;
     document.documentElement.dataset.contrast = vm.highContrast ? "high" : "standard";
 
-    const screenKey = onlineView
-      ? `lounge:${vm.lang}`
-      : vm.screen.kind === "home"
-        ? `home:${vm.lang}`
-        : `shell:${vm.screen.game}:${vm.lang}`;
+    const screenKey =
+      onlineMatch !== null
+        ? `online:${onlineMatch.table.id}:${onlineMatch.table.game}:${onlineMatch.role}:${vm.lang}`
+        : onlineView
+          ? `lounge:${vm.lang}`
+          : vm.screen.kind === "home"
+            ? `home:${vm.lang}`
+            : `shell:${vm.screen.game}:${vm.lang}`;
 
     if (
-      !onlineView &&
+      (onlineMatch !== null || !onlineView) &&
       vm.screen.kind === "game_shell" &&
       mountedShell !== null &&
       screenKey === lastScreenKey
@@ -328,7 +485,15 @@ async function bootstrap(): Promise<void> {
           : "classic-btn";
         contrastBtnRef.setAttribute("aria-pressed", String(vm.highContrast));
       }
-      updateGameShellInPlace(mountedShell, vm, s, dispatchAndRender, announce);
+      updateGameShellInPlace(
+        mountedShell,
+        vm,
+        s,
+        dispatchAndRender,
+        announce,
+        onlineMatch?.table ?? null,
+        onlineSession,
+      );
       return;
     }
 
@@ -359,15 +524,27 @@ async function bootstrap(): Promise<void> {
     h1.textContent = "Boomergames";
     const badge = document.createElement("span");
     badge.className = "brand-badge";
-    badge.textContent = `${s.offlineBadge} v${vm.version}`;
+    badge.textContent =
+      onlineMatch !== null
+        ? `${s.onlineBadge} #${onlineMatch.table.no}`
+        : onlineView
+          ? `${s.onlineBadge} v${vm.version}`
+          : `${s.offlineBadge} v${vm.version}`;
     brand.append(h1, badge);
 
     const controls = document.createElement("div");
     controls.className = "top-controls";
-    if (onlineView) {
+    if (onlineMatch !== null) {
+      controls.append(
+        makeButton(s.loungeLeaveTable, () => {
+          onlineSession.leaveTable();
+        }),
+      );
+    } else if (onlineView) {
       controls.append(
         makeButton(s.navOfflinePlay, () => {
           onlineView = false;
+          syncRemoteBridge();
           renderApp();
         }),
       );
@@ -392,7 +569,7 @@ async function bootstrap(): Promise<void> {
         soundBtn.textContent = synth.isMuted() ? s.soundOff : s.soundOn;
         soundBtn.className = synth.isMuted() ? "classic-btn" : "classic-btn active-toggle";
         soundBtn.setAttribute("aria-pressed", String(!synth.isMuted()));
-        persistFromVm(bridge.viewModel());
+        persistFromVm(activeBridge().viewModel());
       },
       { active: !synth.isMuted() },
     );
@@ -421,12 +598,13 @@ async function bootstrap(): Promise<void> {
     main.id = "main-content";
     main.className = "main-area";
 
-    if (onlineView) {
+    if (onlineView && onlineMatch === null) {
       const loungeHost = document.createElement("div");
       main.append(loungeHost);
       root.append(main);
       lobbyController = new LobbyController(loungeHost, onlineSession, s, () => {
         onlineView = false;
+        syncRemoteBridge();
         renderApp();
       });
     } else if (vm.screen.kind === "home") {
@@ -459,6 +637,15 @@ async function bootstrap(): Promise<void> {
       const sidePanelHost = document.createElement("aside");
       sidePanelHost.className = "side-panel";
 
+      const sideControlsHost = document.createElement("div");
+      sideControlsHost.className = "control-group";
+      sidePanelHost.append(sideControlsHost);
+
+      let inlineChat: InlineTableChat | null = null;
+      if (onlineMatch !== null) {
+        inlineChat = buildInlineTableChat(sidePanelHost, s, onlineSession);
+      }
+
       let poolWidgets: PoolWidgets | null = null;
       if (vm.screen.game === "pool") {
         const landscapeNote = document.createElement("div");
@@ -471,7 +658,7 @@ async function bootstrap(): Promise<void> {
 
         const { box: spinBox, spinDot } = buildSpinWidget(s, dispatchAndRender);
         const { box: powerBox, powerMask, powerReadout } = buildPowerWidget(s, dispatchAndRender);
-        const sideControls = buildPoolSideControls(sidePanelHost, s, dispatchAndRender);
+        const sideControls = buildPoolSideControls(sideControlsHost, s, dispatchAndRender);
         poolWidgets = { spinDot, powerMask, powerReadout, sideControls };
 
         stageRow.append(spinBox, frame, powerBox);
@@ -512,10 +699,19 @@ async function bootstrap(): Promise<void> {
         canvasHost: frame,
         bannerHost,
         playersHost,
-        sidePanelHost,
+        sideControlsHost,
         poolWidgets,
+        inlineChat,
       };
-      updateGameShellInPlace(mountedShell, vm, s, dispatchAndRender, announce);
+      updateGameShellInPlace(
+        mountedShell,
+        vm,
+        s,
+        dispatchAndRender,
+        announce,
+        onlineMatch?.table ?? null,
+        onlineSession,
+      );
     }
 
     // Footer
@@ -557,12 +753,17 @@ async function bootstrap(): Promise<void> {
       return;
     }
 
-    const vm = bridge.viewModel();
+    const vm = activeBridge().viewModel();
     if (vm.screen.kind !== "game_shell" || vm.screen.pool === null) {
       return;
     }
     const pool = vm.screen.pool;
-    if (pool.animating || pool.state.outcome !== null || pool.state.botThinking) {
+    if (
+      pool.animating ||
+      pool.state.outcome !== null ||
+      pool.state.botThinking ||
+      !canActForSeat(vm.remoteRole, pool.state.activeSeat)
+    ) {
       return;
     }
 
@@ -584,19 +785,99 @@ async function bootstrap(): Promise<void> {
     const dt = now - lastTime;
     lastTime = now;
 
-    if (bridge.tick(dt)) {
+    const current = activeBridge();
+    if (current.tick(dt)) {
       renderApp();
     }
-    synth.playAll(bridge.drainSoundCues());
+    synth.playAll(current.drainSoundCues());
 
     if (mountedShell !== null) {
       mountedShell.stage.render(
-        mountedShell.game === "pool" ? bridge.poolFrame(now) : undefined,
+        mountedShell.game === "pool" ? current.poolFrame(now) : undefined,
       );
     }
     window.requestAnimationFrame(loop);
   };
   window.requestAnimationFrame(loop);
+}
+
+function buildInlineTableChat(
+  parent: HTMLElement,
+  s: Strings,
+  session: OnlineSession,
+): InlineTableChat {
+  const wrap = document.createElement("div");
+  wrap.className = "inline-chat-panel";
+
+  const heading = document.createElement("h3");
+  heading.textContent = s.loungeTableChatTitle;
+
+  const log = document.createElement("div");
+  log.className = "chat-log inline-chat-log";
+  log.setAttribute("role", "log");
+  log.setAttribute("aria-live", "polite");
+
+  const form = document.createElement("form");
+  form.className = "chat-form";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "classic-input";
+  input.maxLength = 300;
+  input.placeholder = s.loungeChatPlaceholder;
+  input.setAttribute("aria-label", s.loungeChatPlaceholder);
+
+  const sendBtn = document.createElement("button");
+  sendBtn.type = "submit";
+  sendBtn.className = "classic-btn primary btn-sm";
+  sendBtn.textContent = s.loungeSendBtn;
+
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    if (input.value.trim() !== "") {
+      session.sendChat(input.value, "table");
+      input.value = "";
+    }
+  });
+
+  form.append(input, sendBtn);
+  wrap.append(heading, log, form);
+  parent.append(wrap);
+  return { log, lastKey: "" };
+}
+
+function updateInlineTableChat(
+  chat: InlineTableChat,
+  lines: readonly ChatLineDto[],
+  ignored: ReadonlySet<string>,
+  s: Strings,
+): void {
+  const visible = lines.filter((line) => line.from === undefined || !ignored.has(line.from));
+  const last = visible[visible.length - 1];
+  const key = `${visible.length}:${last?.ts ?? 0}:${last?.text ?? ""}`;
+  if (key === chat.lastKey) {
+    return;
+  }
+  chat.lastKey = key;
+  chat.log.innerHTML = "";
+  if (visible.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "chat-sys-line";
+    empty.textContent = s.loungeChatEmpty;
+    chat.log.append(empty);
+    return;
+  }
+  for (const line of visible) {
+    const item = document.createElement("div");
+    item.className = line.sys ? "chat-sys-line" : "chat-line";
+    if (!line.sys && line.name !== undefined) {
+      const author = document.createElement("strong");
+      author.textContent = `${line.name}: `;
+      item.append(author);
+    }
+    item.append(document.createTextNode(line.text));
+    chat.log.append(item);
+  }
+  chat.log.scrollTop = chat.log.scrollHeight;
 }
 
 function buildSpinWidget(
@@ -765,6 +1046,7 @@ function buildPoolSideControls(
     shootBtn,
     aimLabel,
     aimRange,
+    aidGroup: document.createElement("div"),
     aidSelect: document.createElement("select"),
     timerGroup: document.createElement("div"),
     timerSelect: document.createElement("select"),
@@ -783,8 +1065,7 @@ function buildPoolSideControls(
   };
 
   // Aiming aid selector
-  const aidGroup = document.createElement("div");
-  aidGroup.className = "control-group";
+  controls.aidGroup.className = "control-group";
   const aidLabel = document.createElement("label");
   aidLabel.htmlFor = "pool-aim-aid";
   aidLabel.textContent = s.poolAimAidLabel;
@@ -811,7 +1092,7 @@ function buildPoolSideControls(
       },
     });
   });
-  aidGroup.append(aidLabel, controls.aidSelect);
+  controls.aidGroup.append(aidLabel, controls.aidSelect);
 
   // Shot timer selector
   controls.timerGroup.className = "control-group";
@@ -865,7 +1146,7 @@ function buildPoolSideControls(
     modeBox,
     shootBtn,
     aimGroup,
-    aidGroup,
+    controls.aidGroup,
     controls.timerGroup,
     controls.callRow,
     actions,
@@ -880,12 +1161,25 @@ function updateGameShellInPlace(
   s: Strings,
   dispatch: (input: UiInput) => void,
   announce: (text: string) => void,
+  onlineTable: TableSnapshotDto | null,
+  onlineSession: OnlineSession,
 ): void {
   if (vm.screen.kind !== "game_shell") {
     return;
   }
 
+  if (shell.inlineChat !== null && onlineTable !== null) {
+    updateInlineTableChat(shell.inlineChat, onlineTable.chat, onlineSession.state.ignored, s);
+  }
+
   shell.bannerHost.innerHTML = "";
+  if (onlineTable !== null && onlineSession.state.authNotice === "opponent_disconnected_paused") {
+    const pauseBanner = document.createElement("div");
+    pauseBanner.className = "error-banner";
+    pauseBanner.setAttribute("role", "alert");
+    pauseBanner.textContent = s.opponentDisconnected;
+    shell.bannerHost.append(pauseBanner);
+  }
   if (vm.lastError !== null) {
     const err = document.createElement("div");
     err.className = "error-banner";
@@ -900,26 +1194,41 @@ function updateGameShellInPlace(
   if (vm.screen.game === "checkers" && vm.screen.checkers !== null) {
     const view = vm.screen.checkers;
     shell.stage.syncCheckers(view);
-    renderCheckersHud(shell, view, vm.screen.mode, s, dispatch, announce);
+    renderCheckersHud(shell, vm, view, vm.screen.mode, s, dispatch, announce, onlineTable);
     return;
   }
 
   if (vm.screen.game === "pool" && vm.screen.pool !== null) {
     const view = vm.screen.pool;
     shell.stage.syncPool(view);
-    renderPoolHud(shell, view, vm.screen.mode, s, dispatch, announce);
+    renderPoolHud(shell, vm, view, vm.screen.mode, s, dispatch, announce, onlineTable);
+    return;
   }
+
+  // Initial remote frame still arriving
+  const wait = document.createElement("div");
+  wait.className = "notice-banner";
+  wait.textContent = s.loungeConnecting;
+  shell.bannerHost.append(wait);
 }
 
 function renderPoolHud(
   shell: MountedShell,
+  vm: ViewModel,
   view: PoolView,
   mode: LocalModeDto,
   s: Strings,
   dispatch: (input: UiInput) => void,
   announce: (text: string) => void,
+  onlineTable: TableSnapshotDto | null,
 ): void {
   const st = view.state;
+  const isOnline = onlineTable !== null;
+  const isSpectator = vm.remoteRole === "spectator";
+  const mySeatIdx: 0 | 1 | null =
+    vm.remoteRole === "seat1" ? 0 : vm.remoteRole === "seat2" ? 1 : null;
+  const myRematchReady = isOnline && mySeatIdx !== null && onlineTable.ready[mySeatIdx] === true;
+  const canAct = canActForSeat(vm.remoteRole, st.activeSeat);
 
   // Update spin dot & vertical power bar smoothly without recreating DOM nodes
   if (shell.poolWidgets !== null) {
@@ -935,17 +1244,22 @@ function renderPoolHud(
 
   // Status / Outcome / Foul / Ball-in-hand banners
   if (st.outcome !== null) {
-    const outcomeText = formatPoolOutcome(st.outcome, mode, s);
+    const outcomeText = formatPoolOutcome(st.outcome, mode, s, onlineTable);
     announce(outcomeText);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
     const msg = document.createElement("span");
-    msg.textContent = outcomeText;
-    banner.append(
-      msg,
-      makeButton(s.rematch, () => dispatch({ kind: "rematch" }), { primary: true }),
-    );
+    msg.textContent = myRematchReady ? `${outcomeText} · ${s.rematchWaiting}` : outcomeText;
+    banner.append(msg);
+    if (!isSpectator) {
+      banner.append(
+        makeButton(s.rematch, () => dispatch({ kind: "rematch" }), {
+          primary: !myRematchReady,
+          disabled: myRematchReady,
+        }),
+      );
+    }
     shell.bannerHost.append(banner);
   } else if (st.botThinking) {
     const banner = document.createElement("div");
@@ -971,20 +1285,36 @@ function renderPoolHud(
       }
     }
 
-    if (st.isBreakShot) {
+    if (isOnline && isSpectator) {
       const b = document.createElement("div");
       b.className = "notice-banner";
-      b.textContent = s.poolBreakHint;
+      b.textContent = s.spectatingBanner;
+      shell.bannerHost.append(b);
+    } else if (isOnline && !canAct) {
+      const b = document.createElement("div");
+      b.className = "notice-banner";
+      b.textContent = s.opponentTurnBanner;
+      shell.bannerHost.append(b);
+    } else if (st.isBreakShot) {
+      const b = document.createElement("div");
+      b.className = "notice-banner";
+      b.textContent = isOnline ? `${s.yourTurnBanner} ${s.poolBreakHint}` : s.poolBreakHint;
       shell.bannerHost.append(b);
     } else if (st.ballInHand) {
       const b = document.createElement("div");
       b.className = "notice-banner";
-      b.textContent = st.ballInHandBehindLine ? s.poolBallInHandBehind : s.poolBallInHand;
+      const bih = st.ballInHandBehindLine ? s.poolBallInHandBehind : s.poolBallInHand;
+      b.textContent = isOnline ? `${s.yourTurnBanner} ${bih}` : bih;
       shell.bannerHost.append(b);
     } else if (st.settings.callEight && st.isOnEightBall) {
       const b = document.createElement("div");
       b.className = "notice-banner";
       b.textContent = s.poolCallPocketHint;
+      shell.bannerHost.append(b);
+    } else if (isOnline && canAct) {
+      const b = document.createElement("div");
+      b.className = "notice-banner";
+      b.textContent = s.yourTurnBanner;
       shell.bannerHost.append(b);
     }
   }
@@ -1016,7 +1346,7 @@ function renderPoolHud(
             : group === "stripes"
               ? s.poolStripes
               : s.poolOpenTable;
-    nameEl.textContent = `${isActive ? "▶ " : ""}${formatSeatName(idx, mode, s)} · ${groupText}`;
+    nameEl.textContent = `${isActive ? "▶ " : ""}${formatSeatName(idx, mode, s, onlineTable)} · ${groupText}`;
 
     const tray = document.createElement("div");
     tray.className = "pocketed-tray";
@@ -1047,9 +1377,11 @@ function renderPoolHud(
   if (shell.poolWidgets !== null) {
     const c = shell.poolWidgets.sideControls;
     c.currentSettings = st.settings;
-    c.modeBox.textContent = `${s.modeLabel}: ${formatMode(mode, s)}`;
+    c.modeBox.textContent = isOnline
+      ? `${s.onlineMatch} #${onlineTable.no} · ${onlineTable.settings.rated ? s.loungeRated : s.loungeUnrated}`
+      : `${s.modeLabel}: ${formatMode(mode, s)}`;
 
-    const canShoot = !view.animating && st.outcome === null && !st.botThinking;
+    const canShoot = !view.animating && st.outcome === null && !st.botThinking && canAct;
     c.shootBtn.disabled = !canShoot;
     c.aimRange.disabled = !canShoot;
 
@@ -1069,58 +1401,81 @@ function renderPoolHud(
     c.timerSelect.value = String(st.settings.shotTimerSecs);
     c.callBox.checked = st.settings.callEight;
 
-    c.timerGroup.style.display = st.freePractice ? "none" : "flex";
-    c.callRow.style.display = st.freePractice ? "none" : "flex";
-    c.rerackBtn.style.display = st.freePractice ? "inline-block" : "none";
+    c.aidGroup.style.display = isOnline ? "none" : "flex";
+    c.timerGroup.style.display = isOnline || st.freePractice ? "none" : "flex";
+    c.callRow.style.display = isOnline || st.freePractice ? "none" : "flex";
+    c.rerackBtn.style.display = !isOnline && st.freePractice ? "inline-block" : "none";
     c.rerackBtn.disabled = view.animating;
-    c.resignBtn.style.display = st.freePractice ? "none" : "inline-block";
+    c.resignBtn.style.display = st.freePractice || isSpectator ? "none" : "inline-block";
     c.resignBtn.disabled = st.outcome !== null;
-    c.rematchBtn.style.display = st.freePractice ? "none" : "inline-block";
-    c.rematchBtn.className = st.outcome !== null ? "classic-btn primary" : "classic-btn";
+    c.rematchBtn.style.display = st.freePractice || isSpectator ? "none" : "inline-block";
+    c.rematchBtn.disabled = isOnline && (st.outcome === null || myRematchReady);
+    c.rematchBtn.className = st.outcome !== null && !myRematchReady ? "classic-btn primary" : "classic-btn";
   }
 }
 
 function renderCheckersHud(
   shell: MountedShell,
+  vm: ViewModel,
   view: CheckersView,
   mode: LocalModeDto,
   s: Strings,
   dispatch: (input: UiInput) => void,
   announce: (text: string) => void,
+  onlineTable: TableSnapshotDto | null,
 ): void {
   const st = view.state;
+  const isOnline = onlineTable !== null;
+  const isSpectator = vm.remoteRole === "spectator";
+  const mySeat: SeatDto | null =
+    vm.remoteRole === "seat1" ? "1" : vm.remoteRole === "seat2" ? "2" : null;
+  const mySeatIdx: 0 | 1 | null = mySeat === "1" ? 0 : mySeat === "2" ? 1 : null;
+  const myRematchReady = isOnline && mySeatIdx !== null && onlineTable.ready[mySeatIdx] === true;
+  const canAct = canActForSeat(vm.remoteRole, st.activeSeat);
 
   if (st.outcome !== null) {
-    const outcomeText = formatCheckersOutcome(st.outcome, mode, s);
+    const outcomeText = formatCheckersOutcome(st.outcome, mode, s, onlineTable);
     announce(outcomeText);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
     const msg = document.createElement("span");
-    msg.textContent = outcomeText;
-    banner.append(
-      msg,
-      makeButton(s.rematch, () => dispatch({ kind: "rematch" }), { primary: true }),
-    );
+    msg.textContent = myRematchReady ? `${outcomeText} · ${s.rematchWaiting}` : outcomeText;
+    banner.append(msg);
+    if (!isSpectator) {
+      banner.append(
+        makeButton(s.rematch, () => dispatch({ kind: "rematch" }), {
+          primary: !myRematchReady,
+          disabled: myRematchReady,
+        }),
+      );
+    }
     shell.bannerHost.append(banner);
   } else if (st.drawOfferedBy !== null) {
-    announce(s.drawOfferedPrompt);
-    const banner = document.createElement("div");
-    banner.className = "notice-banner";
-    banner.setAttribute("role", "status");
-    const msg = document.createElement("span");
-    msg.textContent = s.drawOfferedPrompt;
-    const actions = document.createElement("div");
-    actions.className = "control-row";
-    actions.append(
-      makeButton(s.acceptDraw, () => dispatch({ kind: "answer_draw", accept: true }), {
-        primary: true,
-      }),
-      makeButton(s.declineDraw, () => dispatch({ kind: "answer_draw", accept: false })),
-    );
-    banner.append(msg, actions);
-    shell.bannerHost.append(banner);
-  } else if (st.mandatoryCapture) {
+    if (isOnline && mySeat !== null && st.drawOfferedBy === mySeat) {
+      const banner = document.createElement("div");
+      banner.className = "notice-banner";
+      banner.textContent = s.drawOfferSent;
+      shell.bannerHost.append(banner);
+    } else if (!isSpectator) {
+      announce(s.drawOfferedPrompt);
+      const banner = document.createElement("div");
+      banner.className = "notice-banner";
+      banner.setAttribute("role", "status");
+      const msg = document.createElement("span");
+      msg.textContent = s.drawOfferedPrompt;
+      const actions = document.createElement("div");
+      actions.className = "control-row";
+      actions.append(
+        makeButton(s.acceptDraw, () => dispatch({ kind: "answer_draw", accept: true }), {
+          primary: true,
+        }),
+        makeButton(s.declineDraw, () => dispatch({ kind: "answer_draw", accept: false })),
+      );
+      banner.append(msg, actions);
+      shell.bannerHost.append(banner);
+    }
+  } else if (st.mandatoryCapture && canAct) {
     announce(s.mustCapture);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
@@ -1132,6 +1487,15 @@ function renderCheckersHud(
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
     banner.textContent = s.botThinking;
+    shell.bannerHost.append(banner);
+  } else if (isOnline) {
+    const banner = document.createElement("div");
+    banner.className = "notice-banner";
+    banner.textContent = isSpectator
+      ? s.spectatingBanner
+      : canAct
+        ? s.yourTurnBanner
+        : s.opponentTurnBanner;
     shell.bannerHost.append(banner);
   }
 
@@ -1158,7 +1522,7 @@ function renderCheckersHud(
     const textWrap = document.createElement("div");
     const nameEl = document.createElement("div");
     nameEl.className = "player-name";
-    nameEl.textContent = `${isActive ? "▶ " : ""}${formatSeatName(idx, mode, s)} (${formatColorName(color, s)})`;
+    nameEl.textContent = `${isActive ? "▶ " : ""}${formatSeatName(idx, mode, s, onlineTable)} (${formatColorName(color, s)})`;
     const subEl = document.createElement("div");
     subEl.className = "player-sub";
     subEl.textContent = `${s.captured}: ${captured}`;
@@ -1183,40 +1547,15 @@ function renderCheckersHud(
   }
   shell.playersHost.append(strip);
 
-  shell.sidePanelHost.innerHTML = "";
+  shell.sideControlsHost.innerHTML = "";
   const heading = document.createElement("h2");
   heading.textContent = s.checkersTitle;
 
   const modeBox = document.createElement("div");
   modeBox.className = "status-box";
-  modeBox.textContent = `${s.modeLabel}: ${formatMode(mode, s)}`;
-
-  const clockGroup = document.createElement("div");
-  clockGroup.className = "control-group";
-  const clockLabel = document.createElement("label");
-  clockLabel.htmlFor = "checkers-clock-select";
-  clockLabel.textContent = s.clockPreset;
-  const select = document.createElement("select");
-  select.id = "checkers-clock-select";
-  select.className = "classic-select";
-  const options: readonly [string, string][] = [
-    ["game:10", s.clockGame10],
-    ["game:5", s.clockGame5],
-    ["move:30", s.clockMove30],
-    ["unlimited", s.clockUnlimited],
-  ];
-  const currentKey = clockKeyFor(st.settings);
-  for (const [val, text] of options) {
-    const opt = document.createElement("option");
-    opt.value = val;
-    opt.textContent = text;
-    opt.selected = val === currentKey;
-    select.append(opt);
-  }
-  select.addEventListener("change", () => {
-    dispatch({ kind: "checkers_set_clock", settings: settingsForClockKey(select.value) });
-  });
-  clockGroup.append(clockLabel, select);
+  modeBox.textContent = isOnline
+    ? `${s.onlineMatch} #${onlineTable.no} · ${onlineTable.settings.rated ? s.loungeRated : s.loungeUnrated}`
+    : `${s.modeLabel}: ${formatMode(mode, s)}`;
 
   const displayRow = document.createElement("div");
   displayRow.className = "control-row";
@@ -1229,20 +1568,58 @@ function renderCheckersHud(
     }),
   );
 
-  const actionRow = document.createElement("div");
-  actionRow.className = "control-row";
-  const inProgress = st.outcome === null;
-  actionRow.append(
-    makeButton(s.offerDraw, () => dispatch({ kind: "offer_draw" }), {
-      disabled: !inProgress || st.drawOfferedBy !== null,
-    }),
-    makeButton(s.resign, () => dispatch({ kind: "resign" }), {
-      disabled: !inProgress,
-    }),
-    makeButton(s.rematch, () => dispatch({ kind: "rematch" }), {
-      primary: !inProgress,
-    }),
-  );
+  shell.sideControlsHost.append(heading, modeBox);
+
+  if (!isOnline) {
+    const clockGroup = document.createElement("div");
+    clockGroup.className = "control-group";
+    const clockLabel = document.createElement("label");
+    clockLabel.htmlFor = "checkers-clock-select";
+    clockLabel.textContent = s.clockPreset;
+    const select = document.createElement("select");
+    select.id = "checkers-clock-select";
+    select.className = "classic-select";
+    const options: readonly [string, string][] = [
+      ["game:10", s.clockGame10],
+      ["game:5", s.clockGame5],
+      ["move:30", s.clockMove30],
+      ["unlimited", s.clockUnlimited],
+    ];
+    const currentKey = clockKeyFor(st.settings);
+    for (const [val, text] of options) {
+      const opt = document.createElement("option");
+      opt.value = val;
+      opt.textContent = text;
+      opt.selected = val === currentKey;
+      select.append(opt);
+    }
+    select.addEventListener("change", () => {
+      dispatch({ kind: "checkers_set_clock", settings: settingsForClockKey(select.value) });
+    });
+    clockGroup.append(clockLabel, select);
+    shell.sideControlsHost.append(clockGroup);
+  }
+
+  shell.sideControlsHost.append(displayRow);
+
+  if (!isSpectator) {
+    const actionRow = document.createElement("div");
+    actionRow.className = "control-row";
+    const inProgress = st.outcome === null;
+    actionRow.append(
+      makeButton(s.offerDraw, () => dispatch({ kind: "offer_draw" }), {
+        disabled: !inProgress || st.drawOfferedBy !== null,
+      }),
+      makeButton(s.resign, () => dispatch({ kind: "resign" }), {
+        disabled: !inProgress,
+      }),
+      makeButton(s.rematch, () => dispatch({ kind: "rematch" }), {
+        primary: !inProgress && !myRematchReady,
+        disabled: isOnline && (inProgress || myRematchReady),
+      }),
+    );
+    shell.sideControlsHost.append(actionRow);
+  }
 
   const movesHeading = document.createElement("h3");
   movesHeading.textContent = s.moveListTitle;
@@ -1270,16 +1647,7 @@ function renderCheckersHud(
   keysHint.className = "keys-hint";
   keysHint.textContent = s.checkersKeysHint;
 
-  shell.sidePanelHost.append(
-    heading,
-    modeBox,
-    clockGroup,
-    displayRow,
-    actionRow,
-    movesHeading,
-    moveList,
-    keysHint,
-  );
+  shell.sideControlsHost.append(movesHeading, moveList, keysHint);
 }
 
 function renderHome(s: Strings, dispatch: (input: UiInput) => void): HTMLElement {

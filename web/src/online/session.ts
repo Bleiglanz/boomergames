@@ -215,12 +215,27 @@ export class OnlineSession {
   private pendingLoginToken: string | null = null;
   private pendingTableLink: string | null = null;
   private readonly listeners = new Set<() => void>();
+  private readonly gameFrameListeners = new Set<(rawJson: string) => void>();
+  public latestGameFrameJson: string | null = null;
 
   subscribe(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => {
       this.listeners.delete(fn);
     };
+  }
+
+  subscribeGameFrames(fn: (rawJson: string) => void): () => void {
+    this.gameFrameListeners.add(fn);
+    return () => {
+      this.gameFrameListeners.delete(fn);
+    };
+  }
+
+  private emitGameFrame(rawJson: string): void {
+    for (const fn of this.gameFrameListeners) {
+      fn(rawJson);
+    }
   }
 
   private notify(): void {
@@ -287,6 +302,7 @@ export class OnlineSession {
       this.ws = null;
     }
     this.state.status = "idle";
+    this.latestGameFrameJson = null;
     this.notify();
   }
 
@@ -297,9 +313,17 @@ export class OnlineSession {
     this.ws.send(JSON.stringify({ t: type, d: data }));
   }
 
+  sendRawJson(rawJson: string): void {
+    if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.ws.send(rawJson);
+  }
+
   joinRoom(roomId: string): void {
     this.state.playNowState = "idle";
     this.state.activeTable = null;
+    this.latestGameFrameJson = null;
     this.send("lobby.join", { room: roomId });
     this.notify();
   }
@@ -324,6 +348,7 @@ export class OnlineSession {
     this.send("table.leave", {});
     this.state.activeTable = null;
     this.state.playNowState = "idle";
+    this.latestGameFrameJson = null;
     this.notify();
   }
 
@@ -453,7 +478,7 @@ export class OnlineSession {
       }
       try {
         const env = JSON.parse(ev.data) as { t: string; d: Record<string, unknown> };
-        this.handleServerMessage(env.t, env.d);
+        this.handleServerMessage(env.t, env.d, ev.data);
       } catch {
         // Ignore malformed server frames.
       }
@@ -492,7 +517,7 @@ export class OnlineSession {
     }
   }
 
-  private handleServerMessage(type: string, d: Record<string, unknown>): void {
+  private handleServerMessage(type: string, d: Record<string, unknown>, rawJson: string): void {
     switch (type) {
       case "welcome": {
         this.state.status = "connected";
@@ -579,13 +604,20 @@ export class OnlineSession {
         break;
       }
       case "table.snapshot": {
-        this.state.activeTable = d as unknown as TableSnapshotDto;
+        const nextTable = d as unknown as TableSnapshotDto;
+        if (this.state.activeTable?.id !== nextTable.id) {
+          this.latestGameFrameJson = null;
+        }
+        this.state.activeTable = nextTable;
         this.state.playNowState = "idle";
         break;
       }
       case "table.update": {
         const upd = d as unknown as TableUpdateDto;
         if (this.state.activeTable !== null && this.state.activeTable.id === upd.id) {
+          if (upd.phase === "waiting") {
+            this.latestGameFrameJson = null;
+          }
           this.state.activeTable = {
             ...this.state.activeTable,
             host: upd.host,
@@ -598,8 +630,30 @@ export class OnlineSession {
         }
         break;
       }
+      case "checkers.snapshot":
+      case "pool.snapshot": {
+        this.latestGameFrameJson = rawJson;
+        if (this.state.activeTable !== null && this.state.activeTable.phase === "waiting") {
+          this.state.activeTable = { ...this.state.activeTable, phase: "playing" };
+        }
+        this.notify();
+        this.emitGameFrame(rawJson);
+        return;
+      }
+      case "pool.shot": {
+        if (d.state !== undefined) {
+          this.latestGameFrameJson = JSON.stringify({ t: "pool.snapshot", d: { state: d.state } });
+        }
+        if (this.state.activeTable !== null && this.state.activeTable.phase === "waiting") {
+          this.state.activeTable = { ...this.state.activeTable, phase: "playing" };
+          this.notify();
+        }
+        this.emitGameFrame(rawJson);
+        return;
+      }
       case "kicked": {
         this.state.activeTable = null;
+        this.latestGameFrameJson = null;
         this.state.lastError =
           d.reason === "booted" ? "booted_from_table" : "table_closed";
         break;

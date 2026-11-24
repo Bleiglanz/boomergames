@@ -911,3 +911,16 @@ body {
     flex-direction: column;
   }
 }
+
+.inline-chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border-top: 2px solid var(--border-dark);
+  padding-top: 0.65rem;
+  margin-top: 0.25rem;
+}
+
+.inline-chat-log {
+  height: 145px;
+}

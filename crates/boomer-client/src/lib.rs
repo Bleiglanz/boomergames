@@ -16,6 +16,7 @@
 
 pub mod animation;
 pub mod app;
+pub mod bridge_adapter;
 pub mod local_adapter;
 pub mod mapping;
 pub mod ports;

@@ -157,6 +157,15 @@ export interface Strings {
   readonly loungeCreateConfirm: string;
   readonly loungeFindMe: string;
   readonly loungeNoHighscores: string;
+  // Live Online Match strings
+  readonly onlineBadge: string;
+  readonly onlineMatch: string;
+  readonly yourTurnBanner: string;
+  readonly opponentTurnBanner: string;
+  readonly spectatingBanner: string;
+  readonly drawOfferSent: string;
+  readonly rematchWaiting: string;
+  readonly opponentDisconnected: string;
 }
 
 const EN: Strings = {
@@ -316,6 +325,14 @@ const EN: Strings = {
   loungeCreateConfirm: "Create Table",
   loungeFindMe: "Find Me",
   loungeNoHighscores: "No ranked human wins recorded yet.",
+  onlineBadge: "Online",
+  onlineMatch: "Online Match",
+  yourTurnBanner: "Your turn!",
+  opponentTurnBanner: "Waiting for opponent…",
+  spectatingBanner: "Spectating live match",
+  drawOfferSent: "Draw offer sent — waiting for opponent…",
+  rematchWaiting: "Rematch requested — waiting for opponent…",
+  opponentDisconnected: "Opponent disconnected — waiting up to 45 s to reconnect…",
 };
 
 const DE: Strings = {
@@ -475,6 +492,14 @@ const DE: Strings = {
   loungeCreateConfirm: "Tisch eröffnen",
   loungeFindMe: "Finde mich",
   loungeNoHighscores: "Noch keine gewerteten Siege gegen Menschen.",
+  onlineBadge: "Online",
+  onlineMatch: "Online-Partie",
+  yourTurnBanner: "Du bist am Zug!",
+  opponentTurnBanner: "Warte auf Gegner…",
+  spectatingBanner: "Live-Partie (Zuschauer)",
+  drawOfferSent: "Remis angeboten — warte auf Antwort…",
+  rematchWaiting: "Revanche angefragt — warte auf Gegner…",
+  opponentDisconnected: "Gegner getrennt — warte bis zu 45 s auf Wiederverbindung…",
 };
 
 export function getStrings(lang: string): Strings {

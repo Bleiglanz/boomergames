@@ -7,7 +7,8 @@ use boomer_domain::pool::constants::{
 use boomer_domain::pool::{compute_aim_preview, simulate_shot};
 use boomer_protocol::{
     CheckersSettingsDto, CheckersStateDto, ClientMessage, ErrorCode, GameKindDto, LocalModeDto,
-    PROTOCOL_VERSION, PoolSettingsDto, PoolShotDto, PoolStateDto, ServerMessage, SessionKindDto,
+    PROTOCOL_VERSION, PoolSettingsDto, PoolShotDto, PoolStateDto, SeatDto, ServerMessage,
+    SessionKindDto,
 };
 use serde::{Deserialize, Serialize};
 
@@ -207,6 +208,20 @@ pub enum ScreenView {
     },
 }
 
+/// Local user's seat/role within an online multiplayer match (or `Offline` for Step 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteRole {
+    /// Offline single-player / hotseat (controls both seats locally).
+    Offline,
+    /// Online seated player in Seat 1.
+    Seat1,
+    /// Online seated player in Seat 2.
+    Seat2,
+    /// Online spectator (read-only live view).
+    Spectator,
+}
+
 /// Complete immutable UI projection serialized to JS only when state changes.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +230,8 @@ pub struct ViewModel {
     pub version: String,
     /// Active transport mode (`local` in Step 1, `remote` in Step 2).
     pub session_kind: SessionKindDto,
+    /// Local user's role in online matches (`offline` in Step 1).
+    pub remote_role: RemoteRole,
     /// Current screen state.
     pub screen: ScreenView,
     /// High-contrast accessibility flag.
@@ -268,6 +285,7 @@ impl<T: GameTransport> ClientApp<T> {
             view: ViewModel {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 session_kind: SessionKindDto::Local,
+                remote_role: RemoteRole::Offline,
                 screen: ScreenView::Home,
                 high_contrast: false,
                 lang: "en".to_owned(),
@@ -292,6 +310,54 @@ impl<T: GameTransport> ClientApp<T> {
         };
         app.drain_transport();
         app
+    }
+
+    /// Enters an authoritative remote multiplayer game shell for `game` and `role`.
+    pub fn enter_remote_game(&mut self, game: GameKindDto, role: RemoteRole) {
+        self.reset_transient_ui();
+        self.checkers_state = None;
+        self.pool_state = None;
+        self.pending_pool_state = None;
+        self.checkers_flipped = matches!(role, RemoteRole::Seat2);
+        self.view.session_kind = SessionKindDto::Remote;
+        self.view.remote_role = role;
+        self.view.screen = ScreenView::GameShell {
+            game,
+            mode: LocalModeDto::Hotseat,
+            status: "online_match".to_owned(),
+            checkers: None,
+            pool: None,
+        };
+        self.dirty = true;
+    }
+
+    /// Mutable access to the underlying transport (used by `BoomerRemoteClient`).
+    pub const fn transport_mut(&mut self) -> &mut T {
+        &mut self.transport
+    }
+
+    /// Drains any newly pushed transport messages and returns whether `ViewModel` changed.
+    pub fn poll_transport(&mut self) -> bool {
+        self.drain_transport();
+        self.take_dirty()
+    }
+
+    const fn can_act_for_seat(&self, active_seat: SeatDto) -> bool {
+        match self.view.remote_role {
+            RemoteRole::Offline => true,
+            RemoteRole::Seat1 => matches!(active_seat, SeatDto::One),
+            RemoteRole::Seat2 => matches!(active_seat, SeatDto::Two),
+            RemoteRole::Spectator => false,
+        }
+    }
+
+    fn can_act_pool(&self) -> bool {
+        self.pool_state.as_ref().is_some_and(|st| {
+            !self.pool_anim.is_playing()
+                && st.outcome.is_none()
+                && !st.bot_thinking
+                && self.can_act_for_seat(st.active_seat)
+        })
     }
 
     /// Handles a discrete [`UiInput`]. Returns `true` if the `ViewModel` changed.
@@ -353,16 +419,26 @@ impl<T: GameTransport> ClientApp<T> {
             | UiInput::PoolSetSettings { .. }
             | UiInput::PoolRerack => self.handle_pool_ui_input(&input),
             UiInput::Resign => {
-                self.reset_transient_ui();
-                self.send_checked(ClientMessage::Resign {});
+                if self.view.remote_role != RemoteRole::Spectator {
+                    self.reset_transient_ui();
+                    self.send_checked(ClientMessage::Resign {});
+                }
             }
-            UiInput::OfferDraw => self.send_checked(ClientMessage::DrawOffer {}),
+            UiInput::OfferDraw => {
+                if self.view.remote_role != RemoteRole::Spectator {
+                    self.send_checked(ClientMessage::DrawOffer {});
+                }
+            }
             UiInput::AnswerDraw { accept } => {
-                self.send_checked(ClientMessage::DrawAnswer { accept });
+                if self.view.remote_role != RemoteRole::Spectator {
+                    self.send_checked(ClientMessage::DrawAnswer { accept });
+                }
             }
             UiInput::Rematch => {
-                self.reset_transient_ui();
-                self.send_checked(ClientMessage::Rematch {});
+                if self.view.remote_role != RemoteRole::Spectator {
+                    self.reset_transient_ui();
+                    self.send_checked(ClientMessage::Rematch {});
+                }
             }
         }
         self.drain_transport();
@@ -424,19 +500,19 @@ impl<T: GameTransport> ClientApp<T> {
     fn handle_pool_ui_input(&mut self, input: &UiInput) {
         match *input {
             UiInput::PoolSetAim { angle } => {
-                if angle.is_finite() {
+                if angle.is_finite() && self.can_act_pool() {
                     self.pool_aim_angle = angle;
                     self.sync_game_views();
                 }
             }
             UiInput::PoolSetPower { power } => {
-                if power.is_finite() {
+                if power.is_finite() && self.can_act_pool() {
                     self.pool_power = clamp(power, 0.02, 1.0);
                     self.sync_game_views();
                 }
             }
             UiInput::PoolSetSpin { spin_x, spin_y } => {
-                if spin_x.is_finite() && spin_y.is_finite() {
+                if spin_x.is_finite() && spin_y.is_finite() && self.can_act_pool() {
                     let v = Vec2::new(spin_x, spin_y);
                     let len = v.len();
                     let clamped = if len > 1.0 { v.scale(1.0 / len) } else { v };
@@ -446,15 +522,18 @@ impl<T: GameTransport> ClientApp<T> {
                 }
             }
             UiInput::PoolCallPocket { pocket } => {
-                if pocket < 6 {
+                if pocket < 6 && self.can_act_pool() {
                     self.pool_called_pocket = Some(pocket);
                     self.sync_game_views();
                 }
             }
             UiInput::PoolPreviewCue { x, y } => self.handle_pool_preview_cue(x, y),
             UiInput::PoolPlaceCue { x, y } => {
-                self.pool_cue_preview = None;
-                self.send_checked(ClientMessage::PoolPlaceCue { x, y });
+                if self.can_act_pool() && self.pool_state.as_ref().is_some_and(|st| st.ball_in_hand)
+                {
+                    self.pool_cue_preview = None;
+                    self.send_checked(ClientMessage::PoolPlaceCue { x, y });
+                }
             }
             UiInput::PoolCancelCuePreview => {
                 if self.pool_cue_preview.is_some() {
@@ -478,7 +557,11 @@ impl<T: GameTransport> ClientApp<T> {
         let Some(state) = &self.pool_state else {
             return;
         };
-        if !state.ball_in_hand || self.pool_anim.is_playing() || state.bot_thinking {
+        if !state.ball_in_hand
+            || self.pool_anim.is_playing()
+            || state.bot_thinking
+            || !self.can_act_for_seat(state.active_seat)
+        {
             return;
         }
         let valid = is_preview_cue_valid(state, Vec2::new(x, y));
@@ -490,7 +573,11 @@ impl<T: GameTransport> ClientApp<T> {
         let Some(state) = &self.pool_state else {
             return;
         };
-        if self.pool_anim.is_playing() || state.outcome.is_some() || state.bot_thinking {
+        if self.pool_anim.is_playing()
+            || state.outcome.is_some()
+            || state.bot_thinking
+            || !self.can_act_for_seat(state.active_seat)
+        {
             return;
         }
         let cue_pos = if state.ball_in_hand {
@@ -515,7 +602,10 @@ impl<T: GameTransport> ClientApp<T> {
         let Some(state) = self.checkers_state.clone() else {
             return;
         };
-        if state.outcome.is_some() || state.bot_thinking {
+        if state.outcome.is_some()
+            || state.bot_thinking
+            || !self.can_act_for_seat(state.active_seat)
+        {
             return;
         }
 
@@ -547,7 +637,10 @@ impl<T: GameTransport> ClientApp<T> {
         let Some(state) = self.checkers_state.clone() else {
             return;
         };
-        if state.outcome.is_some() || state.bot_thinking {
+        if state.outcome.is_some()
+            || state.bot_thinking
+            || !self.can_act_for_seat(state.active_seat)
+        {
             return;
         }
         if self.selected_path.last() == Some(&from) && self.try_advance_or_submit(&state, to) {
@@ -613,17 +706,20 @@ impl<T: GameTransport> ClientApp<T> {
     }
 
     fn build_checkers_view(&self, state: &CheckersStateDto) -> CheckersView {
+        let can_act = self.can_act_for_seat(state.active_seat);
         let mut selectable = Vec::new();
-        for mv in &state.legal_moves {
-            if let Some(&start) = mv.path.first()
-                && !selectable.contains(&start)
-            {
-                selectable.push(start);
+        if can_act {
+            for mv in &state.legal_moves {
+                if let Some(&start) = mv.path.first()
+                    && !selectable.contains(&start)
+                {
+                    selectable.push(start);
+                }
             }
         }
 
         let mut highlighted = Vec::new();
-        if !self.selected_path.is_empty() {
+        if can_act && !self.selected_path.is_empty() {
             let matching: Vec<&boomer_protocol::CheckersMoveDto> = state
                 .legal_moves
                 .iter()
@@ -664,7 +760,9 @@ impl<T: GameTransport> ClientApp<T> {
 
     fn build_pool_view(&self, state: &PoolStateDto) -> PoolView {
         let animating = self.pool_anim.is_playing();
-        let aim_preview = if !animating && state.outcome.is_none() && !state.bot_thinking {
+        let can_act = self.can_act_for_seat(state.active_seat);
+        let aim_preview = if !animating && state.outcome.is_none() && !state.bot_thinking && can_act
+        {
             let domain_balls = pool_balls_from_dto(&state.balls);
             domain_balls.first().filter(|cue| !cue.pocketed).map(|cue| {
                 let preview = compute_aim_preview(

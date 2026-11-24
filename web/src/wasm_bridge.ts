@@ -1,8 +1,9 @@
-import initWasm, { BoomerClient } from "./wasm/boomer_client.js";
+import initWasm, { BoomerClient, BoomerRemoteClient } from "./wasm/boomer_client.js";
 
 export type GameKindDto = "checkers" | "pool";
 export type BotLevelDto = "easy" | "medium" | "hard";
 export type SeatDto = "1" | "2";
+export type RemoteRole = "offline" | "seat1" | "seat2" | "spectator";
 
 export type LocalModeDto =
   | { readonly kind: "hotseat" }
@@ -158,6 +159,7 @@ export type ScreenView =
 export interface ViewModel {
   readonly version: string;
   readonly sessionKind: "local" | "remote";
+  readonly remoteRole: RemoteRole;
   readonly screen: ScreenView;
   readonly highContrast: boolean;
   readonly lang: string;
@@ -201,7 +203,15 @@ export type SoundCue =
   | { readonly kind: "clock_warn" }
   | { readonly kind: "game_over" };
 
-export class WasmBridge {
+export interface GameBridge {
+  dispatch(input: UiInput): boolean;
+  tick(dtMs: number): boolean;
+  viewModel(): ViewModel;
+  poolFrame(tMs: number): Float64Array;
+  drainSoundCues(): readonly SoundCue[];
+}
+
+export class WasmBridge implements GameBridge {
   private readonly client: BoomerClient;
 
   private constructor(client: BoomerClient) {
@@ -235,5 +245,73 @@ export class WasmBridge {
       return [];
     }
     return JSON.parse(raw) as SoundCue[];
+  }
+}
+
+export class RemoteWasmBridge implements GameBridge {
+  private readonly client: BoomerRemoteClient;
+  private disposed = false;
+
+  public constructor(game: GameKindDto, role: Exclude<RemoteRole, "offline">) {
+    this.client = new BoomerRemoteClient(game, role);
+  }
+
+  public pushServerMessage(rawJson: string): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    return this.client.pushServerMessage(rawJson);
+  }
+
+  public drainClientMessages(): readonly string[] {
+    if (this.disposed) {
+      return [];
+    }
+    const raw = this.client.drainClientMessagesJson();
+    if (raw === "[]") {
+      return [];
+    }
+    const msgs = JSON.parse(raw) as unknown[];
+    return msgs.map((m) => JSON.stringify(m));
+  }
+
+  public dispatch(input: UiInput): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    return this.client.dispatchInput(JSON.stringify(input));
+  }
+
+  public tick(dtMs: number): boolean {
+    if (this.disposed) {
+      return false;
+    }
+    return this.client.tick(Math.max(0, Math.min(250, Math.round(dtMs))));
+  }
+
+  public viewModel(): ViewModel {
+    return JSON.parse(this.client.viewModelJson()) as ViewModel;
+  }
+
+  public poolFrame(tMs: number): Float64Array {
+    return this.client.poolFrame(tMs);
+  }
+
+  public drainSoundCues(): readonly SoundCue[] {
+    if (this.disposed) {
+      return [];
+    }
+    const raw = this.client.drainSoundCuesJson();
+    if (raw === "[]") {
+      return [];
+    }
+    return JSON.parse(raw) as SoundCue[];
+  }
+
+  public dispose(): void {
+    if (!this.disposed) {
+      this.disposed = true;
+      this.client.free();
+    }
   }
 }

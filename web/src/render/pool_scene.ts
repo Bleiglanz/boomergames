@@ -375,7 +375,13 @@ export class PoolScene {
 
   public handlePointerDown(worldX: number, worldY: number): void {
     const view = this.currentView;
-    if (view === null || view.animating || view.state.outcome !== null || view.state.botThinking) {
+    if (
+      view === null ||
+      view.animating ||
+      view.state.outcome !== null ||
+      view.state.botThinking ||
+      view.aimPreview === null
+    ) {
       return;
     }
 
@@ -415,7 +421,13 @@ export class PoolScene {
 
   public handlePointerMove(worldX: number, worldY: number): void {
     const view = this.currentView;
-    if (view === null || view.animating || view.state.outcome !== null || view.state.botThinking) {
+    if (
+      view === null ||
+      view.animating ||
+      view.state.outcome !== null ||
+      view.state.botThinking ||
+      view.aimPreview === null
+    ) {
       return;
     }
     if (this.draggingCueBall) {
