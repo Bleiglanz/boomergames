@@ -149,6 +149,14 @@ pub trait UserRepo: Send + Sync {
 
     /// Permanently deletes a user account (cascading `player_stats`, nullifying `matches`/`reports`).
     fn delete_user(&self, user_id: i64) -> BoxFuture<'_, Result<(), PortError>>;
+
+    /// Adds or removes `target_id` from `user_id`'s persisted `ignored_ids` list.
+    fn set_ignored(
+        &self,
+        user_id: i64,
+        target_id: i64,
+        ignored: bool,
+    ) -> BoxFuture<'_, Result<Vec<i64>, PortError>>;
 }
 
 /// Port for per-game player ratings and the High Score leaderboard.

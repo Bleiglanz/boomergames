@@ -1,26 +1,32 @@
 //! WebSocket connection handler enforcing handshake, 4 KB frame cap, rate limits,
-//! 20s ping/pong liveness, non-blocking outbound queues, and passwordless auth.
+//! 20s ping/pong liveness, non-blocking outbound queues, auth, and actor routing.
 
-use std::sync::atomic::Ordering;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use boomer_protocol::{
-    ClientMessage, ErrorCode, PROTOCOL_VERSION, ServerMessage, SessionKindDto, UserStatusDto,
+    ChatScopeDto, ClientMessage, ErrorCode, GameKindDto, PROTOCOL_VERSION, ServerMessage,
+    SessionKindDto, TableRoleDto, UserDto, UserStatusDto,
 };
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{debug, warn};
 
+use crate::actors::ClientSink;
+use crate::actors::lobby_actor::LobbyCmd;
+use crate::actors::table_actor::{TableClient, TableCmd};
 use crate::auth::validate_email;
 use crate::mapping::{
     game_kind_from_dto, guest_to_user_dto, highscore_entry_to_dto, match_item_to_dto,
     parse_user_id, stat_record_to_profile_dto, user_record_to_dto,
 };
-use crate::ports::PortError;
+use crate::ports::{PortError, UserRecord};
 use crate::state::AppState;
 
 /// Maximum inbound JSON text frame size (4 KB per `incubation/plan.md` §9.6).
@@ -45,6 +51,40 @@ const MAX_RATE_STRIKES: u8 = 5;
 enum ConnIdentity {
     Guest,
     Registered { user_id: i64 },
+}
+
+struct ConnSession {
+    identity: ConnIdentity,
+    user: UserDto,
+    muted: bool,
+    ignored: HashSet<String>,
+    active_room: Option<String>,
+    out_tx: mpsc::Sender<Message>,
+    sink: ClientSink,
+    slow_disconnect: Arc<AtomicBool>,
+    disconnect_notify: Arc<Notify>,
+}
+
+impl ConnSession {
+    fn send_msg(&self, msg: &ServerMessage) -> bool {
+        self.sink.send_msg(msg)
+    }
+
+    fn send_error(&self, code: ErrorCode, re: &str) -> bool {
+        self.send_msg(&ServerMessage::Error {
+            code,
+            re: re.to_owned(),
+        })
+    }
+
+    fn to_table_client(&self) -> TableClient {
+        TableClient {
+            user: self.user.clone(),
+            sink: self.sink.clone(),
+            last_chat_at: None,
+            muted: self.muted,
+        }
+    }
 }
 
 struct RateLimiter {
@@ -94,6 +134,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Message>(OUTBOUND_QUEUE_CAP);
+    let slow_disconnect = Arc::new(AtomicBool::new(false));
+    let disconnect_notify = Arc::new(Notify::new());
 
     let writer = tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
@@ -103,28 +145,59 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
-    // Step 1: First message MUST be `hello` within 10 seconds (§9.6).
-    let Some(mut identity) = perform_handshake(&mut ws_rx, &out_tx, &state).await else {
+    let Some(mut session) = perform_handshake(
+        &mut ws_rx,
+        out_tx.clone(),
+        Arc::clone(&slow_disconnect),
+        Arc::clone(&disconnect_notify),
+        &state,
+    )
+    .await
+    else {
+        let _ = out_tx.try_send(Message::Close(None));
         drop(out_tx);
         let _ = writer.await;
         return;
     };
 
-    // Step 2: Authenticated / Guest message loop with 20s ping/pong liveness.
+    state.hub.register_connection(session.sink.clone());
+    run_message_loop(&mut ws_rx, &mut session, &state).await;
+    cleanup_session(&session, &state);
+
+    let _ = out_tx.try_send(Message::Close(None));
+    drop(out_tx);
+    let _ = writer.await;
+}
+
+async fn run_message_loop(
+    ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
+    session: &mut ConnSession,
+    state: &AppState,
+) {
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
-    ping_ticker.tick().await; // consume immediate tick
+    ping_ticker.tick().await;
     let mut missed_pongs: u8 = 0;
     let mut limiter = RateLimiter::new();
 
     loop {
+        if session.slow_disconnect.load(Ordering::Acquire) {
+            debug!(user = %session.user.id, "disconnecting slow client");
+            break;
+        }
         tokio::select! {
+            () = session.disconnect_notify.notified() => {
+                if session.slow_disconnect.load(Ordering::Acquire) {
+                    debug!(user = %session.user.id, "disconnecting slow client on notify");
+                    break;
+                }
+            }
             _ = ping_ticker.tick() => {
                 if missed_pongs >= MAX_MISSED_PONGS {
                     debug!("closing silent WebSocket after missed pongs");
                     break;
                 }
                 missed_pongs = missed_pongs.saturating_add(1);
-                if out_tx.try_send(Message::Ping(Vec::new().into())).is_err() {
+                if session.out_tx.try_send(Message::Ping(Vec::new().into())).is_err() {
                     debug!("disconnecting slow WebSocket client on ping backpressure");
                     break;
                 }
@@ -133,67 +206,70 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 let Some(Ok(frame)) = maybe_frame else {
                     break;
                 };
-                match frame {
-                    Message::Pong(_) => {
-                        missed_pongs = 0;
-                    }
-                    Message::Ping(payload) => {
-                        if out_tx.try_send(Message::Pong(payload)).is_err() {
-                            break;
-                        }
-                    }
-                    Message::Close(_) => break,
-                    Message::Binary(_) => {
-                        if !send_error(&out_tx, ErrorCode::Invalid, "binary") {
-                            break;
-                        }
-                    }
-                    Message::Text(text) => {
-                        if text.len() > MAX_MESSAGE_BYTES {
-                            if !send_error(&out_tx, ErrorCode::Invalid, "frame") {
-                                break;
-                            }
-                            continue;
-                        }
-                        if let Err(should_disconnect) = limiter.allow() {
-                            let _ = send_error(&out_tx, ErrorCode::RateLimited, "rate");
-                            if should_disconnect {
-                                break;
-                            }
-                            continue;
-                        }
-                        let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) else {
-                            if !send_error(&out_tx, ErrorCode::Invalid, "parse") {
-                                break;
-                            }
-                            continue;
-                        };
-                        let keep_open = handle_client_message(
-                            client_msg,
-                            &mut identity,
-                            &out_tx,
-                            &state,
-                        )
-                        .await;
-                        if !keep_open {
-                            break;
-                        }
-                    }
+                if !handle_ws_frame(frame, &mut missed_pongs, &mut limiter, session, state).await {
+                    break;
                 }
             }
         }
     }
+}
 
-    let _ = out_tx.try_send(Message::Close(None));
-    drop(out_tx);
-    let _ = writer.await;
+async fn handle_ws_frame(
+    frame: Message,
+    missed_pongs: &mut u8,
+    limiter: &mut RateLimiter,
+    session: &mut ConnSession,
+    state: &AppState,
+) -> bool {
+    match frame {
+        Message::Pong(_) => {
+            *missed_pongs = 0;
+            true
+        }
+        Message::Ping(payload) => session.out_tx.try_send(Message::Pong(payload)).is_ok(),
+        Message::Close(_) => false,
+        Message::Binary(_) => session.send_error(ErrorCode::Invalid, "binary"),
+        Message::Text(text) => {
+            if text.len() > MAX_MESSAGE_BYTES {
+                return session.send_error(ErrorCode::Invalid, "frame");
+            }
+            if let Err(should_disconnect) = limiter.allow() {
+                let _ = session.send_error(ErrorCode::RateLimited, "rate");
+                return !should_disconnect;
+            }
+            let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) else {
+                return session.send_error(ErrorCode::Invalid, "parse");
+            };
+            handle_client_message(client_msg, session, state).await
+        }
+    }
+}
+
+fn cleanup_session(session: &ConnSession, state: &AppState) {
+    if let Some(tid) = state.hub.user_table(&session.user.id)
+        && let Some(table) = state.hub.find_table(&tid)
+    {
+        table.try_send(TableCmd::Leave {
+            user_id: session.user.id.clone(),
+        });
+    }
+    if let Some(ref rid) = session.active_room
+        && let Some(room) = state.hub.find_room(rid)
+    {
+        room.try_send(LobbyCmd::Leave {
+            user_id: session.user.id.clone(),
+        });
+    }
+    state.hub.unregister_connection(&session.user.id);
 }
 
 async fn perform_handshake(
     ws_rx: &mut futures_util::stream::SplitStream<WebSocket>,
-    out_tx: &mpsc::Sender<Message>,
+    out_tx: mpsc::Sender<Message>,
+    slow_disconnect: Arc<AtomicBool>,
+    disconnect_notify: Arc<Notify>,
     state: &AppState,
-) -> Option<ConnIdentity> {
+) -> Option<ConnSession> {
     let first = tokio::time::timeout(Duration::from_secs(10), ws_rx.next())
         .await
         .ok()??
@@ -202,18 +278,18 @@ async fn perform_handshake(
         return None;
     };
     if text.len() > MAX_MESSAGE_BYTES {
-        let _ = send_error(out_tx, ErrorCode::Invalid, "hello");
+        let _ = send_raw_error(&out_tx, ErrorCode::Invalid, "hello");
         return None;
     }
     let Ok(ClientMessage::Hello { v, session, guest }) =
         serde_json::from_str::<ClientMessage>(&text)
     else {
-        let _ = send_error(out_tx, ErrorCode::NotAllowed, "hello");
+        let _ = send_raw_error(&out_tx, ErrorCode::NotAllowed, "hello");
         return None;
     };
 
     if v != PROTOCOL_VERSION {
-        let _ = send_error(out_tx, ErrorCode::UpgradeRequired, "hello");
+        let _ = send_raw_error(&out_tx, ErrorCode::UpgradeRequired, "hello");
         return None;
     }
 
@@ -223,26 +299,41 @@ async fn perform_handshake(
         && let Ok(Some(user)) = state.users.find_by_id(claims.user_id).await
     {
         if user.banned_until.is_some_and(|until| until > Utc::now()) {
-            let _ = send_error(out_tx, ErrorCode::Banned, "hello");
+            let _ = send_raw_error(&out_tx, ErrorCode::Banned, "hello");
             return None;
         }
         if user.session_version == claims.session_version {
             let me = user_record_to_dto(&user, 1200, 0, UserStatusDto::Available);
-            let _ = send_msg(
-                out_tx,
-                &ServerMessage::Welcome {
-                    protocol_version: PROTOCOL_VERSION,
-                    mode: SessionKindDto::Remote,
-                    me: Some(me),
-                    guest: None,
-                    rooms: state.default_rooms(),
-                },
+            let sink = ClientSink::new(
+                me.id.clone(),
+                out_tx.clone(),
+                Arc::clone(&slow_disconnect),
+                Arc::clone(&disconnect_notify),
             );
-            return Some(ConnIdentity::Registered { user_id: user.id });
+            if !sink.send_msg(&ServerMessage::Welcome {
+                protocol_version: PROTOCOL_VERSION,
+                mode: SessionKindDto::Remote,
+                me: Some(me.clone()),
+                guest: None,
+                rooms: state.default_rooms(),
+            }) {
+                return None;
+            }
+            return Some(ConnSession {
+                identity: ConnIdentity::Registered { user_id: user.id },
+                user: me,
+                muted: is_muted(&user),
+                ignored: ignored_wire_set(&user),
+                active_room: None,
+                out_tx,
+                sink,
+                slow_disconnect,
+                disconnect_notify,
+            });
         }
     }
 
-    // Otherwise resume a valid guest reconnect token or issue a new guest identity.
+    // Otherwise resume a valid guest reconnect token or issue a fresh guest identity.
     let (guest_num, issued_guest_token) = if let Some(ref g_tok) = guest
         && let Ok(claims) = state.signer.verify_guest(g_tok)
     {
@@ -254,98 +345,395 @@ async fn perform_handshake(
     };
 
     let me = guest_to_user_dto(guest_num, UserStatusDto::Available);
-    if !send_msg(
-        out_tx,
-        &ServerMessage::Welcome {
-            protocol_version: PROTOCOL_VERSION,
-            mode: SessionKindDto::Remote,
-            me: Some(me),
-            guest: issued_guest_token,
-            rooms: state.default_rooms(),
-        },
-    ) {
+    let sink = ClientSink::new(
+        me.id.clone(),
+        out_tx.clone(),
+        Arc::clone(&slow_disconnect),
+        Arc::clone(&disconnect_notify),
+    );
+    if !sink.send_msg(&ServerMessage::Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        mode: SessionKindDto::Remote,
+        me: Some(me.clone()),
+        guest: issued_guest_token,
+        rooms: state.default_rooms(),
+    }) {
         return None;
     }
-    Some(ConnIdentity::Guest)
+    Some(ConnSession {
+        identity: ConnIdentity::Guest,
+        user: me,
+        muted: false,
+        ignored: HashSet::new(),
+        active_room: None,
+        out_tx,
+        sink,
+        slow_disconnect,
+        disconnect_notify,
+    })
 }
 
 async fn handle_client_message(
     msg: ClientMessage,
-    identity: &mut ConnIdentity,
-    out_tx: &mpsc::Sender<Message>,
+    session: &mut ConnSession,
     state: &AppState,
 ) -> bool {
     match msg {
-        ClientMessage::AuthEmail { email } => handle_auth_email(&email, out_tx, state).await,
-        ClientMessage::AuthMagic { token } => {
-            handle_auth_magic(&token, identity, out_tx, state).await
-        }
+        ClientMessage::AuthEmail { email } => handle_auth_email(&email, session, state).await,
+        ClientMessage::AuthMagic { token } => handle_auth_magic(&token, session, state).await,
         ClientMessage::AuthGoogle { id_token } => {
-            handle_auth_google(&id_token, identity, out_tx, state).await
+            handle_auth_google(&id_token, session, state).await
         }
-        ClientMessage::AuthLogout {} => {
-            let guest_num = state.allocate_guest_num();
-            let guest_tok = state.signer.sign_guest(guest_num).ok();
-            *identity = ConnIdentity::Guest;
-            send_msg(
-                out_tx,
-                &ServerMessage::Welcome {
-                    protocol_version: PROTOCOL_VERSION,
-                    mode: SessionKindDto::Remote,
-                    me: Some(guest_to_user_dto(guest_num, UserStatusDto::Available)),
-                    guest: guest_tok,
-                    rooms: state.default_rooms(),
-                },
-            )
-        }
+        ClientMessage::AuthLogout {} => handle_auth_logout(session, state).await,
         ClientMessage::AccountUpdate { name, avatar } => {
-            handle_account_update(name.as_deref(), avatar, identity, out_tx, state).await
+            handle_account_update(name.as_deref(), avatar, session, state).await
         }
-        ClientMessage::AccountDelete {} => {
-            let ConnIdentity::Registered { user_id } = *identity else {
-                return send_error(out_tx, ErrorCode::NotAllowed, "account.delete");
-            };
-            if state.users.delete_user(user_id).await.is_err() {
-                return send_error(out_tx, ErrorCode::Invalid, "account.delete");
-            }
-            // Spec §9.6: server closes the connection after deleting the account.
-            false
-        }
-        ClientMessage::ProfileGet { user_id } => handle_profile_get(&user_id, out_tx, state).await,
+        ClientMessage::AccountDelete {} => handle_account_delete(session, state).await,
+        ClientMessage::ProfileGet { user_id } => handle_profile_get(&user_id, session, state).await,
         ClientMessage::HighscoresGet { game, around } => {
-            let around_uid = if around {
-                match *identity {
-                    ConnIdentity::Registered { user_id } => Some(user_id),
-                    ConnIdentity::Guest => None,
-                }
-            } else {
-                None
-            };
-            match state
-                .stats
-                .highscores(game_kind_from_dto(game), around_uid)
-                .await
-            {
-                Ok(entries) => send_msg(
-                    out_tx,
-                    &ServerMessage::Highscores {
-                        game,
-                        rows: entries.iter().map(highscore_entry_to_dto).collect(),
-                    },
-                ),
-                Err(_) => send_error(out_tx, ErrorCode::Invalid, "highscores.get"),
-            }
+            handle_highscores_get(game, around, session, state).await
         }
-        ClientMessage::Hello { .. } => send_error(out_tx, ErrorCode::NotAllowed, "hello"),
-        _ => send_error(out_tx, ErrorCode::NotAllowed, "unsupported"),
+        ClientMessage::LobbyJoin { room } => handle_lobby_join(&room, session, state).await,
+        ClientMessage::ChatSend { text, scope } => handle_chat_send(text, scope, session, state),
+        ClientMessage::TableCreate(settings) => {
+            let Some(room) = active_room_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "table.create");
+            };
+            let _ = room
+                .send(LobbyCmd::CreateTable {
+                    user_id: session.user.id.clone(),
+                    settings,
+                })
+                .await;
+            true
+        }
+        ClientMessage::TableJoin { table_id, role } => {
+            handle_table_join(&table_id, role, session, state).await
+        }
+        ClientMessage::TableLeave {} => {
+            if let Some(table) = active_table_handle(session, state) {
+                let _ = table
+                    .send(TableCmd::Leave {
+                        user_id: session.user.id.clone(),
+                    })
+                    .await;
+            }
+            true
+        }
+        ClientMessage::PlayNow { vs_bot } => {
+            let Some(room) = active_room_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "play.now");
+            };
+            let _ = room
+                .send(LobbyCmd::PlayNow {
+                    user_id: session.user.id.clone(),
+                    vs_bot,
+                })
+                .await;
+            true
+        }
+        ClientMessage::InviteSend {
+            to,
+            table_id,
+            settings,
+        } => {
+            let Some(room) = active_room_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "invite.send");
+            };
+            let _ = room
+                .send(LobbyCmd::SendInvite {
+                    from_id: session.user.id.clone(),
+                    to_id: to,
+                    table_id,
+                    settings,
+                })
+                .await;
+            true
+        }
+        ClientMessage::InviteAnswer { invite_id, accept } => {
+            let Some(room) = active_room_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "invite.answer");
+            };
+            let _ = room
+                .send(LobbyCmd::AnswerInvite {
+                    user_id: session.user.id.clone(),
+                    invite_id,
+                    accept,
+                })
+                .await;
+            true
+        }
+        ClientMessage::IgnoreSet { user_id, on } => {
+            handle_ignore_set(&user_id, on, session, state).await
+        }
+        other => handle_table_scoped_message(other, session, state).await,
     }
 }
 
-async fn handle_auth_email(
-    raw_email: &str,
-    out_tx: &mpsc::Sender<Message>,
+async fn handle_table_scoped_message(
+    msg: ClientMessage,
+    session: &ConnSession,
     state: &AppState,
 ) -> bool {
+    let uid = session.user.id.clone();
+    match msg {
+        ClientMessage::Ready {} => {
+            send_table_cmd(
+                session,
+                state,
+                "ready",
+                TableCmd::ToggleReady { user_id: uid },
+            )
+            .await
+        }
+        ClientMessage::SettingsSet(settings) => {
+            send_table_cmd(
+                session,
+                state,
+                "settings.set",
+                TableCmd::UpdateSettings {
+                    user_id: uid,
+                    settings,
+                },
+            )
+            .await
+        }
+        ClientMessage::SeatTake { seat } => {
+            send_table_cmd(
+                session,
+                state,
+                "seat.take",
+                TableCmd::TakeSeat { user_id: uid, seat },
+            )
+            .await
+        }
+        ClientMessage::SeatLeave {} => {
+            send_table_cmd(
+                session,
+                state,
+                "seat.leave",
+                TableCmd::LeaveSeat { user_id: uid },
+            )
+            .await
+        }
+        ClientMessage::Boot { user_id } => {
+            send_table_cmd(
+                session,
+                state,
+                "boot",
+                TableCmd::BootUser {
+                    host_id: uid,
+                    target_id: user_id,
+                },
+            )
+            .await
+        }
+        ClientMessage::BotAdd { level } => {
+            send_table_cmd(
+                session,
+                state,
+                "bot.add",
+                TableCmd::AddBot {
+                    host_id: uid,
+                    level,
+                },
+            )
+            .await
+        }
+        ClientMessage::BotRemove {} => {
+            send_table_cmd(
+                session,
+                state,
+                "bot.remove",
+                TableCmd::RemoveBot { host_id: uid },
+            )
+            .await
+        }
+        ClientMessage::Hello { .. } => session.send_error(ErrorCode::NotAllowed, "hello"),
+        _ => session.send_error(ErrorCode::NotAllowed, "unsupported"),
+    }
+}
+
+async fn send_table_cmd(session: &ConnSession, state: &AppState, re: &str, cmd: TableCmd) -> bool {
+    let Some(table) = active_table_handle(session, state) else {
+        return session.send_error(ErrorCode::NotAllowed, re);
+    };
+    if !table.send(cmd).await {
+        return session.send_error(ErrorCode::NotAllowed, re);
+    }
+    true
+}
+
+fn handle_chat_send(
+    text: String,
+    scope: Option<ChatScopeDto>,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    let active_table = active_table_handle(session, state);
+    let target_scope = scope.unwrap_or_else(|| {
+        if active_table.is_some() {
+            ChatScopeDto::Table
+        } else {
+            ChatScopeDto::Lobby
+        }
+    });
+
+    match target_scope {
+        ChatScopeDto::Table => {
+            let Some(table) = active_table else {
+                return session.send_error(ErrorCode::NotAllowed, "chat.send");
+            };
+            table.try_send(TableCmd::SendChat {
+                user_id: session.user.id.clone(),
+                text,
+            });
+            true
+        }
+        ChatScopeDto::Lobby => {
+            let Some(room) = active_room_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "chat.send");
+            };
+            room.try_send(LobbyCmd::SendChat {
+                user_id: session.user.id.clone(),
+                text,
+            });
+            true
+        }
+    }
+}
+
+async fn handle_lobby_join(room_id: &str, session: &mut ConnSession, state: &AppState) -> bool {
+    let Some(room) = state.hub.find_room(room_id) else {
+        return session.send_error(ErrorCode::Invalid, "lobby.join");
+    };
+
+    // Leave any active table and previous room when switching rooms.
+    if let Some(tid) = state.hub.user_table(&session.user.id)
+        && let Some(table) = state.hub.find_table(&tid)
+    {
+        let _ = table
+            .send(TableCmd::Leave {
+                user_id: session.user.id.clone(),
+            })
+            .await;
+    }
+    if let Some(prev_id) = session.active_room.take()
+        && prev_id != room_id
+        && let Some(prev_room) = state.hub.find_room(&prev_id)
+    {
+        let _ = prev_room
+            .send(LobbyCmd::Leave {
+                user_id: session.user.id.clone(),
+            })
+            .await;
+    }
+
+    refresh_rating_for_game(room.game, session, state).await;
+
+    let (tx, rx) = oneshot::channel();
+    if !room
+        .send(LobbyCmd::Join {
+            user: session.user.clone(),
+            sink: session.sink.clone(),
+            ignored: session.ignored.clone(),
+            muted: session.muted,
+            reply: tx,
+        })
+        .await
+    {
+        return session.send_error(ErrorCode::Invalid, "lobby.join");
+    }
+
+    match rx.await {
+        Ok(Ok(snapshot)) => {
+            session.active_room = Some(room_id.to_owned());
+            session.send_msg(&ServerMessage::LobbySnapshot(Box::new(snapshot)))
+        }
+        Ok(Err(code)) => session.send_error(code, "lobby.join"),
+        Err(_) => session.send_error(ErrorCode::Invalid, "lobby.join"),
+    }
+}
+
+async fn handle_table_join(
+    table_id: &str,
+    role: TableRoleDto,
+    session: &mut ConnSession,
+    state: &AppState,
+) -> bool {
+    let Some(table) = state.hub.find_table(table_id) else {
+        return session.send_error(ErrorCode::Invalid, "table.join");
+    };
+
+    // Ensure caller is in the table's owning room (enables direct `/#table=<id>` links).
+    if session.active_room.as_deref() != Some(table.room_id.as_str())
+        && !handle_lobby_join(&table.room_id, session, state).await
+    {
+        return false;
+    }
+
+    // Leave any different table first.
+    if let Some(prev_tid) = state.hub.user_table(&session.user.id)
+        && prev_tid != table_id
+        && let Some(prev_table) = state.hub.find_table(&prev_tid)
+    {
+        let _ = prev_table
+            .send(TableCmd::Leave {
+                user_id: session.user.id.clone(),
+            })
+            .await;
+    }
+
+    let (tx, rx) = oneshot::channel();
+    if !table
+        .send(TableCmd::Join {
+            client: session.to_table_client(),
+            role,
+            reply: tx,
+        })
+        .await
+    {
+        return session.send_error(ErrorCode::Invalid, "table.join");
+    }
+
+    match rx.await {
+        Ok(Ok(snapshot)) => session.send_msg(&ServerMessage::TableSnapshot(Box::new(snapshot))),
+        Ok(Err(code)) => session.send_error(code, "table.join"),
+        Err(_) => session.send_error(ErrorCode::Invalid, "table.join"),
+    }
+}
+
+async fn handle_ignore_set(
+    target_wire_id: &str,
+    on: bool,
+    session: &mut ConnSession,
+    state: &AppState,
+) -> bool {
+    if target_wire_id == session.user.id {
+        return session.send_error(ErrorCode::Invalid, "ignore.set");
+    }
+    if on {
+        session.ignored.insert(target_wire_id.to_owned());
+    } else {
+        session.ignored.remove(target_wire_id);
+    }
+
+    if let ConnIdentity::Registered { user_id } = session.identity
+        && let Some(target_uid) = parse_user_id(target_wire_id)
+        && state
+            .users
+            .set_ignored(user_id, target_uid, on)
+            .await
+            .is_err()
+    {
+        return session.send_error(ErrorCode::Invalid, "ignore.set");
+    }
+
+    sync_member_update(session, state);
+    true
+}
+
+async fn handle_auth_email(raw_email: &str, session: &ConnSession, state: &AppState) -> bool {
     if let Some(email) = validate_email(raw_email)
         && let Ok(token) = state.signer.sign_magic(&email)
     {
@@ -355,46 +743,25 @@ async fn handle_auth_email(
             warn!(%err, "failed to dispatch magic-link email");
         }
     }
-    // Always reply `auth.sent` to avoid leaking whether an email is registered (§9.6).
-    send_msg(out_tx, &ServerMessage::AuthSent {})
+    session.send_msg(&ServerMessage::AuthSent {})
 }
 
-async fn handle_auth_magic(
-    token: &str,
-    identity: &mut ConnIdentity,
-    out_tx: &mpsc::Sender<Message>,
-    state: &AppState,
-) -> bool {
+async fn handle_auth_magic(token: &str, session: &mut ConnSession, state: &AppState) -> bool {
     let Ok(claims) = state.signer.verify_magic(token) else {
-        return send_error(out_tx, ErrorCode::Invalid, "auth.magic");
+        return session.send_error(ErrorCode::Invalid, "auth.magic");
     };
-    complete_login(
-        &claims.email,
-        None,
-        None,
-        identity,
-        out_tx,
-        state,
-        "auth.magic",
-    )
-    .await
+    complete_login(&claims.email, None, None, session, state, "auth.magic").await
 }
 
-async fn handle_auth_google(
-    id_token: &str,
-    identity: &mut ConnIdentity,
-    out_tx: &mpsc::Sender<Message>,
-    state: &AppState,
-) -> bool {
+async fn handle_auth_google(id_token: &str, session: &mut ConnSession, state: &AppState) -> bool {
     let Ok(verified) = state.google.verify_id_token(id_token).await else {
-        return send_error(out_tx, ErrorCode::Invalid, "auth.google");
+        return session.send_error(ErrorCode::Invalid, "auth.google");
     };
     complete_login(
         &verified.email,
         Some(&verified.sub),
         verified.suggested_name.as_deref(),
-        identity,
-        out_tx,
+        session,
         state,
         "auth.google",
     )
@@ -405,8 +772,7 @@ async fn complete_login(
     email: &str,
     google_sub: Option<&str>,
     suggested_name: Option<&str>,
-    identity: &mut ConnIdentity,
-    out_tx: &mpsc::Sender<Message>,
+    session: &mut ConnSession,
     state: &AppState,
     re: &str,
 ) -> bool {
@@ -415,35 +781,93 @@ async fn complete_login(
         .find_or_create_by_email(email, google_sub, suggested_name)
         .await
     else {
-        return send_error(out_tx, ErrorCode::Invalid, re);
+        return session.send_error(ErrorCode::Invalid, re);
     };
     if user.banned_until.is_some_and(|until| until > Utc::now()) {
-        return send_error(out_tx, ErrorCode::Banned, re);
+        return session.send_error(ErrorCode::Banned, re);
     }
-    let Ok(session) = state.signer.sign_session(user.id, user.session_version) else {
-        return send_error(out_tx, ErrorCode::Invalid, re);
+    let Ok(token) = state.signer.sign_session(user.id, user.session_version) else {
+        return session.send_error(ErrorCode::Invalid, re);
     };
-    *identity = ConnIdentity::Registered { user_id: user.id };
+
     let me = user_record_to_dto(&user, 1200, 0, UserStatusDto::Available);
-    send_msg(
-        out_tx,
-        &ServerMessage::AuthOk {
-            session,
-            me,
-            is_new,
-        },
+    switch_identity(
+        session,
+        ConnIdentity::Registered { user_id: user.id },
+        me.clone(),
+        is_muted(&user),
+        ignored_wire_set(&user),
+        state,
     )
+    .await;
+
+    session.send_msg(&ServerMessage::AuthOk {
+        session: token,
+        me,
+        is_new,
+    })
+}
+
+async fn handle_auth_logout(session: &mut ConnSession, state: &AppState) -> bool {
+    let guest_num = state.allocate_guest_num();
+    let guest_tok = state.signer.sign_guest(guest_num).ok();
+    let me = guest_to_user_dto(guest_num, UserStatusDto::Available);
+    switch_identity(
+        session,
+        ConnIdentity::Guest,
+        me.clone(),
+        false,
+        HashSet::new(),
+        state,
+    )
+    .await;
+
+    session.send_msg(&ServerMessage::Welcome {
+        protocol_version: PROTOCOL_VERSION,
+        mode: SessionKindDto::Remote,
+        me: Some(me),
+        guest: guest_tok,
+        rooms: state.default_rooms(),
+    })
+}
+
+async fn switch_identity(
+    session: &mut ConnSession,
+    new_identity: ConnIdentity,
+    new_user: UserDto,
+    new_muted: bool,
+    new_ignored: HashSet<String>,
+    state: &AppState,
+) {
+    let previous_room = session.active_room.clone();
+    cleanup_session(session, state);
+
+    session.identity = new_identity;
+    session.user = new_user.clone();
+    session.muted = new_muted;
+    session.ignored = new_ignored;
+    session.active_room = None;
+    session.sink = ClientSink::new(
+        new_user.id,
+        session.out_tx.clone(),
+        Arc::clone(&session.slow_disconnect),
+        Arc::clone(&session.disconnect_notify),
+    );
+    state.hub.register_connection(session.sink.clone());
+
+    if let Some(room_id) = previous_room {
+        let _ = handle_lobby_join(&room_id, session, state).await;
+    }
 }
 
 async fn handle_account_update(
     name: Option<&str>,
     avatar: Option<u8>,
-    identity: &ConnIdentity,
-    out_tx: &mpsc::Sender<Message>,
+    session: &mut ConnSession,
     state: &AppState,
 ) -> bool {
-    let ConnIdentity::Registered { user_id } = *identity else {
-        return send_error(out_tx, ErrorCode::NotAllowed, "account.update");
+    let ConnIdentity::Registered { user_id } = session.identity else {
+        return session.send_error(ErrorCode::NotAllowed, "account.update");
     };
     let avatar_i16 = avatar.map(i16::from);
     match state
@@ -452,36 +876,42 @@ async fn handle_account_update(
         .await
     {
         Ok(user) => {
-            let Ok(session) = state.signer.sign_session(user.id, user.session_version) else {
-                return send_error(out_tx, ErrorCode::Invalid, "account.update");
+            let Ok(token) = state.signer.sign_session(user.id, user.session_version) else {
+                return session.send_error(ErrorCode::Invalid, "account.update");
             };
-            let me = user_record_to_dto(&user, 1200, 0, UserStatusDto::Available);
-            send_msg(
-                out_tx,
-                &ServerMessage::AuthOk {
-                    session,
-                    me,
-                    is_new: false,
-                },
-            )
+            let me = user_record_to_dto(&user, session.user.rating, 0, session.user.status);
+            session.user.name.clone_from(&me.name);
+            session.user.avatar = me.avatar;
+            sync_member_update(session, state);
+            session.send_msg(&ServerMessage::AuthOk {
+                session: token,
+                me: session.user.clone(),
+                is_new: false,
+            })
         }
         Err(PortError::Conflict(_) | PortError::Invalid(_)) => {
-            send_error(out_tx, ErrorCode::Invalid, "account.update")
+            session.send_error(ErrorCode::Invalid, "account.update")
         }
-        Err(_) => send_error(out_tx, ErrorCode::NotAllowed, "account.update"),
+        Err(_) => session.send_error(ErrorCode::NotAllowed, "account.update"),
     }
 }
 
-async fn handle_profile_get(
-    wire_id: &str,
-    out_tx: &mpsc::Sender<Message>,
-    state: &AppState,
-) -> bool {
+async fn handle_account_delete(session: &ConnSession, state: &AppState) -> bool {
+    let ConnIdentity::Registered { user_id } = session.identity else {
+        return session.send_error(ErrorCode::NotAllowed, "account.delete");
+    };
+    if state.users.delete_user(user_id).await.is_err() {
+        return session.send_error(ErrorCode::Invalid, "account.delete");
+    }
+    false
+}
+
+async fn handle_profile_get(wire_id: &str, session: &ConnSession, state: &AppState) -> bool {
     let Some(uid) = parse_user_id(wire_id) else {
-        return send_error(out_tx, ErrorCode::Invalid, "profile.get");
+        return session.send_error(ErrorCode::Invalid, "profile.get");
     };
     let Ok(Some(user)) = state.users.find_by_id(uid).await else {
-        return send_error(out_tx, ErrorCode::Invalid, "profile.get");
+        return session.send_error(ErrorCode::Invalid, "profile.get");
     };
     let user_stats = state.stats.stats_for_user(uid).await.unwrap_or_default();
     let recent = state
@@ -494,38 +924,115 @@ async fn handle_profile_get(
         .first()
         .map_or((1200, 0), |s| (s.rating, s.rated_games));
 
-    send_msg(
-        out_tx,
-        &ServerMessage::Profile {
-            user: user_record_to_dto(
-                &user,
-                headline_rating,
-                headline_rated_games,
-                UserStatusDto::Available,
-            ),
-            since: user.created_at.timestamp_millis(),
-            stats: user_stats.iter().map(stat_record_to_profile_dto).collect(),
-            last: recent.iter().map(match_item_to_dto).collect(),
-        },
-    )
+    session.send_msg(&ServerMessage::Profile {
+        user: user_record_to_dto(
+            &user,
+            headline_rating,
+            headline_rated_games,
+            UserStatusDto::Available,
+        ),
+        since: user.created_at.timestamp_millis(),
+        stats: user_stats.iter().map(stat_record_to_profile_dto).collect(),
+        last: recent.iter().map(match_item_to_dto).collect(),
+    })
 }
 
-fn send_msg(out_tx: &mpsc::Sender<Message>, msg: &ServerMessage) -> bool {
-    let Ok(json) = serde_json::to_string(msg) else {
+async fn handle_highscores_get(
+    game: GameKindDto,
+    around: bool,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    let around_uid = if around {
+        match session.identity {
+            ConnIdentity::Registered { user_id } => Some(user_id),
+            ConnIdentity::Guest => None,
+        }
+    } else {
+        None
+    };
+    match state
+        .stats
+        .highscores(game_kind_from_dto(game), around_uid)
+        .await
+    {
+        Ok(entries) => session.send_msg(&ServerMessage::Highscores {
+            game,
+            rows: entries.iter().map(highscore_entry_to_dto).collect(),
+        }),
+        Err(_) => session.send_error(ErrorCode::Invalid, "highscores.get"),
+    }
+}
+
+async fn refresh_rating_for_game(game: GameKindDto, session: &mut ConnSession, state: &AppState) {
+    let ConnIdentity::Registered { user_id } = session.identity else {
+        return;
+    };
+    let domain_game = game_kind_from_dto(game);
+    if let Ok(stats) = state.stats.stats_for_user(user_id).await {
+        if let Some(row) = stats.into_iter().find(|s| s.game == domain_game) {
+            session.user.rating = row.rating;
+            session.user.prov = row.rated_games < 10;
+        } else {
+            session.user.rating = 1200;
+            session.user.prov = true;
+        }
+    }
+}
+
+fn sync_member_update(session: &ConnSession, state: &AppState) {
+    if let Some(room) = active_room_handle(session, state) {
+        room.try_send(LobbyCmd::UpdateUser {
+            user: session.user.clone(),
+            ignored: session.ignored.clone(),
+            muted: session.muted,
+        });
+    }
+    if let Some(table) = active_table_handle(session, state) {
+        table.try_send(TableCmd::UpdateMemberUser {
+            user: session.user.clone(),
+            muted: session.muted,
+        });
+    }
+}
+
+fn active_room_handle(
+    session: &ConnSession,
+    state: &AppState,
+) -> Option<crate::actors::lobby_actor::LobbyHandle> {
+    session
+        .active_room
+        .as_deref()
+        .and_then(|rid| state.hub.find_room(rid))
+}
+
+fn active_table_handle(
+    session: &ConnSession,
+    state: &AppState,
+) -> Option<crate::actors::table_actor::TableHandle> {
+    state
+        .hub
+        .user_table(&session.user.id)
+        .and_then(|tid| state.hub.find_table(&tid))
+}
+
+fn is_muted(user: &UserRecord) -> bool {
+    user.muted_until.is_some_and(|until| until > Utc::now())
+}
+
+fn ignored_wire_set(user: &UserRecord) -> HashSet<String> {
+    user.ignored_ids.iter().map(|id| format!("u{id}")).collect()
+}
+
+fn send_raw_error(out_tx: &mpsc::Sender<Message>, code: ErrorCode, re: &str) -> bool {
+    let msg = ServerMessage::Error {
+        code,
+        re: re.to_owned(),
+    };
+    let Ok(json) = serde_json::to_string(&msg) else {
         return false;
     };
-    // Non-blocking `try_send`: slow clients that overflow the bounded queue disconnect cleanly.
     out_tx.try_send(Message::Text(json.into())).is_ok()
-}
-
-fn send_error(out_tx: &mpsc::Sender<Message>, code: ErrorCode, re: &str) -> bool {
-    send_msg(
-        out_tx,
-        &ServerMessage::Error {
-            code,
-            re: re.to_owned(),
-        },
-    )
 }
 
 struct OnlineGuard {

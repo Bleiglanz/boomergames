@@ -256,6 +256,29 @@ impl UserRepo for MemoryRepos {
             Ok(())
         })
     }
+
+    fn set_ignored(
+        &self,
+        user_id: i64,
+        target_id: i64,
+        ignored: bool,
+    ) -> BoxFuture<'_, Result<Vec<i64>, PortError>> {
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            let user = guard.users.get_mut(&user_id).ok_or(PortError::NotFound)?;
+            if ignored {
+                if !user.ignored_ids.contains(&target_id) {
+                    user.ignored_ids.push(target_id);
+                }
+            } else {
+                user.ignored_ids.retain(|&id| id != target_id);
+            }
+            Ok(user.ignored_ids.clone())
+        })
+    }
 }
 
 impl StatsRepo for MemoryRepos {

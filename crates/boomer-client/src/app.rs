@@ -759,40 +759,14 @@ impl<T: GameTransport> ClientApp<T> {
                     self.handle_checkers_snapshot(state);
                 }
                 ServerMessage::PoolSnapshot { state } => {
-                    if self.pool_anim.is_playing() {
-                        self.pending_pool_state = Some(state);
-                    } else {
-                        self.check_pool_clock_warning(&state);
-                        let prev_outcome = self.pool_state.as_ref().and_then(|p| p.outcome);
-                        if prev_outcome.is_none() && state.outcome.is_some() {
-                            self.sound_cues.push(SoundCue::GameOver);
-                        }
-                        let balls = pool_balls_from_dto(&state.balls);
-                        self.pool_anim.load_static(&balls);
-                        self.pool_state = Some(state);
-                        self.pending_pool_state = None;
-                        self.sync_game_views();
-                    }
+                    self.handle_pool_snapshot(state);
                 }
                 ServerMessage::PoolShot {
                     pre_balls,
                     shot,
                     state,
                 } => {
-                    let pre = pool_balls_from_dto(&pre_balls);
-                    let snap = pool_balls_from_dto(&state.balls);
-                    let sim = simulate_shot(&pre, pool_shot_from_dto(shot), true);
-                    self.pool_anim.start_replay(&sim, &snap, shot.power);
-                    self.last_warn_second = None;
-                    if self.pool_anim.is_playing() {
-                        self.pending_pool_state = Some(state);
-                    } else {
-                        self.pool_state = Some(state);
-                        self.pending_pool_state = None;
-                    }
-                    self.pool_spin_x = 0.0;
-                    self.pool_spin_y = 0.0;
-                    self.sync_game_views();
+                    self.handle_pool_shot(&pre_balls, shot, state);
                 }
                 ServerMessage::Error { code, .. } => {
                     self.view.last_error = Some(code);
@@ -801,12 +775,66 @@ impl<T: GameTransport> ClientApp<T> {
                 ServerMessage::AuthSent {}
                 | ServerMessage::AuthOk { .. }
                 | ServerMessage::Profile { .. }
-                | ServerMessage::Highscores { .. } => {
-                    // Handled by the Step 2 online lounge UI in Milestone 5.
+                | ServerMessage::Highscores { .. }
+                | ServerMessage::RoomsUpdate { .. }
+                | ServerMessage::LobbySnapshot(_)
+                | ServerMessage::UserAdd(_)
+                | ServerMessage::UserUpdate(_)
+                | ServerMessage::UserRemove { .. }
+                | ServerMessage::TableUpsert(_)
+                | ServerMessage::TableRemove { .. }
+                | ServerMessage::Chat { .. }
+                | ServerMessage::InviteReceived { .. }
+                | ServerMessage::InviteClosed { .. }
+                | ServerMessage::PlayNowQueued { .. }
+                | ServerMessage::PlayNowTimeout { .. }
+                | ServerMessage::TableSnapshot(_)
+                | ServerMessage::TableUpdate(_)
+                | ServerMessage::Kicked { .. } => {
+                    // Handled by the Step 2 online lounge session controller.
                     self.dirty = true;
                 }
             }
         }
+    }
+
+    fn handle_pool_snapshot(&mut self, state: PoolStateDto) {
+        if self.pool_anim.is_playing() {
+            self.pending_pool_state = Some(state);
+            return;
+        }
+        self.check_pool_clock_warning(&state);
+        let prev_outcome = self.pool_state.as_ref().and_then(|p| p.outcome);
+        if prev_outcome.is_none() && state.outcome.is_some() {
+            self.sound_cues.push(SoundCue::GameOver);
+        }
+        let balls = pool_balls_from_dto(&state.balls);
+        self.pool_anim.load_static(&balls);
+        self.pool_state = Some(state);
+        self.pending_pool_state = None;
+        self.sync_game_views();
+    }
+
+    fn handle_pool_shot(
+        &mut self,
+        pre_balls: &[boomer_protocol::PoolBallDto],
+        shot: PoolShotDto,
+        state: PoolStateDto,
+    ) {
+        let pre = pool_balls_from_dto(pre_balls);
+        let snap = pool_balls_from_dto(&state.balls);
+        let sim = simulate_shot(&pre, pool_shot_from_dto(shot), true);
+        self.pool_anim.start_replay(&sim, &snap, shot.power);
+        self.last_warn_second = None;
+        if self.pool_anim.is_playing() {
+            self.pending_pool_state = Some(state);
+        } else {
+            self.pool_state = Some(state);
+            self.pending_pool_state = None;
+        }
+        self.pool_spin_x = 0.0;
+        self.pool_spin_y = 0.0;
+        self.sync_game_views();
     }
 
     fn handle_checkers_snapshot(&mut self, state: CheckersStateDto) {

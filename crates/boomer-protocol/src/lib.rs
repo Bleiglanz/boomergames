@@ -17,6 +17,7 @@
 pub mod auth;
 pub mod checkers;
 pub mod envelope;
+pub mod lobby;
 pub mod pool;
 
 pub use auth::{
@@ -29,6 +30,11 @@ pub use checkers::{
 pub use envelope::{
     BotLevelDto, ClientMessage, ErrorCode, GameKindDto, LocalModeDto, PROTOCOL_VERSION, SeatDto,
     ServerMessage, SessionKindDto,
+};
+pub use lobby::{
+    ChatLineDto, ChatScopeDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto,
+    TableGameOptsDto, TablePhaseDto, TableRoleDto, TableSettingsDto, TableSnapshotDto,
+    TableSummaryDto, TableUpdateDto, TableVisibilityDto,
 };
 pub use pool::{
     AimAidLevelDto, BallGroupDto, BallInHandRuleDto, EightOnBreakRuleDto, PoolBallDto, PoolFoulDto,

@@ -16,6 +16,7 @@
     )
 )]
 
+pub mod actors;
 pub mod adapters;
 pub mod auth;
 pub mod config;
@@ -23,6 +24,7 @@ pub mod mapping;
 pub mod ports;
 pub mod state;
 
+pub use actors::hub::LobbyHub;
 pub use adapters::http::build_router;
 pub use config::ServerConfig;
 pub use state::AppState;

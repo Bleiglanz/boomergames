@@ -84,6 +84,79 @@ export interface Strings {
   readonly poolWinFoulEight: string;
   readonly poolWinResign: string;
   readonly poolRerackedNotice: string;
+  // Online Lounge & Table strings (Milestone 5)
+  readonly navOnlineLounge: string;
+  readonly navOfflinePlay: string;
+  readonly loungeOfflineTitle: string;
+  readonly loungeOfflineDesc: string;
+  readonly loungePlayOfflineBtn: string;
+  readonly loungeRetryBtn: string;
+  readonly loungeConnecting: string;
+  readonly loungeRoomLabel: string;
+  readonly loungePlayNow: string;
+  readonly loungeCreateTable: string;
+  readonly loungeHighscores: string;
+  readonly loungeSignIn: string;
+  readonly loungeAccountTitle: string;
+  readonly loungeSignInDesc: string;
+  readonly loungeSendMagicLink: string;
+  readonly loungeMagicSent: string;
+  readonly loungeSignedIn: string;
+  readonly loungeSaveAccount: string;
+  readonly loungeLogout: string;
+  readonly loungeDeleteAccount: string;
+  readonly loungeDeleteConfirm: string;
+  readonly loungeCancel: string;
+  readonly loungeTablesTab: string;
+  readonly loungePlayersTab: string;
+  readonly loungeChatTab: string;
+  readonly loungeTableTab: string;
+  readonly loungeControlsTab: string;
+  readonly loungeRoomChatTitle: string;
+  readonly loungeTableChatTitle: string;
+  readonly loungeChatEmpty: string;
+  readonly loungeChatPlaceholder: string;
+  readonly loungeSendBtn: string;
+  readonly loungeNoTables: string;
+  readonly loungeOpenSeat: string;
+  readonly loungeRated: string;
+  readonly loungeUnrated: string;
+  readonly loungeJoin: string;
+  readonly loungeWatch: string;
+  readonly loungeFull: string;
+  readonly loungeInviteBtn: string;
+  readonly loungeIgnore: string;
+  readonly loungeUnignore: string;
+  readonly loungeInviteFrom: string;
+  readonly loungeAccept: string;
+  readonly loungeDecline: string;
+  readonly loungePlayNowWaiting: string;
+  readonly loungePlayNowTimeout: string;
+  readonly loungeCopyLink: string;
+  readonly loungeLinkCopied: string;
+  readonly loungeLeaveTable: string;
+  readonly loungeSeat: string;
+  readonly loungeReadyBadge: string;
+  readonly loungeNotReadyBadge: string;
+  readonly loungeWaitingPlayer: string;
+  readonly loungeSitDown: string;
+  readonly loungeStandUp: string;
+  readonly loungeReadyBtn: string;
+  readonly loungeUnreadyBtn: string;
+  readonly loungeBoot: string;
+  readonly loungeMuteSpectators: string;
+  readonly loungeUnmuteSpectators: string;
+  readonly loungeSpectatorsMuted: string;
+  readonly loungeSpectatorsOpen: string;
+  readonly loungeRemoveBot: string;
+  readonly loungeSpectators: string;
+  readonly loungeNoSpectators: string;
+  readonly loungeVisPublic: string;
+  readonly loungeVisProtected: string;
+  readonly loungeVisPrivate: string;
+  readonly loungeCreateConfirm: string;
+  readonly loungeFindMe: string;
+  readonly loungeNoHighscores: string;
 }
 
 const EN: Strings = {
@@ -169,6 +242,80 @@ const EN: Strings = {
   poolWinFoulEight: "wins (opponent fouled on the 8-ball)!",
   poolWinResign: "wins by resignation!",
   poolRerackedNotice: "8-ball on the break — rack reset!",
+  navOnlineLounge: "Online Lounge",
+  navOfflinePlay: "Offline Play",
+  loungeOfflineTitle: "Online Lounge Unavailable Here",
+  loungeOfflineDesc:
+    "This page is running as a static offline build (no live multiplayer server). You can play Checkers and 8-Ball Pool offline against the computer or hotseat right now!",
+  loungePlayOfflineBtn: "Play Offline Games",
+  loungeRetryBtn: "Retry Connection",
+  loungeConnecting: "Connecting to Boomergames lounge…",
+  loungeRoomLabel: "Room",
+  loungePlayNow: "Play Now",
+  loungeCreateTable: "Create Table",
+  loungeHighscores: "High Scores",
+  loungeSignIn: "Sign In",
+  loungeAccountTitle: "Account & Avatar",
+  loungeSignInDesc:
+    "Enter your email for a passwordless magic login link (no password, no cookies).",
+  loungeSendMagicLink: "Send Login Link",
+  loungeMagicSent: "If the email is valid, your login link has been sent (valid 15 min).",
+  loungeSignedIn: "Signed in!",
+  loungeSaveAccount: "Save Changes",
+  loungeLogout: "Sign Out",
+  loungeDeleteAccount: "Delete Account",
+  loungeDeleteConfirm: "Permanently delete your account and stats? This cannot be undone.",
+  loungeCancel: "Close",
+  loungeTablesTab: "Tables",
+  loungePlayersTab: "Players",
+  loungeChatTab: "Chat",
+  loungeTableTab: "Table",
+  loungeControlsTab: "Host & Info",
+  loungeRoomChatTitle: "Room Chat",
+  loungeTableChatTitle: "Table Chat",
+  loungeChatEmpty: "No messages yet. Say hello!",
+  loungeChatPlaceholder: "Type a message (max 300 chars)…",
+  loungeSendBtn: "Send",
+  loungeNoTables: "No open tables yet. Click Create Table or Play Now!",
+  loungeOpenSeat: "Open",
+  loungeRated: "Rated",
+  loungeUnrated: "Unrated",
+  loungeJoin: "Join",
+  loungeWatch: "Watch",
+  loungeFull: "Full",
+  loungeInviteBtn: "Invite",
+  loungeIgnore: "Ignore",
+  loungeUnignore: "Unignore",
+  loungeInviteFrom: "Table invite from",
+  loungeAccept: "Accept",
+  loungeDecline: "Decline",
+  loungePlayNowWaiting: "Looking for a human opponent nearby in rating…",
+  loungePlayNowTimeout: "No human opponent matched yet — start a bot match right away?",
+  loungeCopyLink: "Copy Link",
+  loungeLinkCopied: "Link Copied!",
+  loungeLeaveTable: "Leave Table",
+  loungeSeat: "Seat",
+  loungeReadyBadge: "Ready",
+  loungeNotReadyBadge: "Not ready",
+  loungeWaitingPlayer: "Waiting for player…",
+  loungeSitDown: "Sit Down",
+  loungeStandUp: "Stand Up",
+  loungeReadyBtn: "Ready / Start",
+  loungeUnreadyBtn: "Cancel Ready",
+  loungeBoot: "Boot",
+  loungeMuteSpectators: "Mute Spectators",
+  loungeUnmuteSpectators: "Unmute Spectators",
+  loungeSpectatorsMuted: "Spectators muted",
+  loungeSpectatorsOpen: "Spectator chat on",
+  loungeRemoveBot: "Remove Bot",
+  loungeSpectators: "Spectators",
+  loungeNoSpectators: "No spectators watching.",
+  loungeVisPublic: "Public (anyone can join)",
+  loungeVisProtected: "Protected (invite to play)",
+  loungeVisPrivate: "Private (invite only)",
+  loungeCreateConfirm: "Create Table",
+  loungeFindMe: "Find Me",
+  loungeNoHighscores: "No ranked human wins recorded yet.",
 };
 
 const DE: Strings = {
@@ -254,6 +401,80 @@ const DE: Strings = {
   poolWinFoulEight: "gewinnt (Foul des Gegners auf der 8)!",
   poolWinResign: "gewinnt durch Aufgabe!",
   poolRerackedNotice: "8 beim Anstoß gefallen — neu aufgebaut!",
+  navOnlineLounge: "Online-Lounge",
+  navOfflinePlay: "Offline spielen",
+  loungeOfflineTitle: "Online-Lounge hier nicht verfügbar",
+  loungeOfflineDesc:
+    "Diese Seite läuft als statische Offline-Version (ohne Live-Server). Dame und 8-Ball Billard sind direkt offline gegen den Computer oder lokal zu zweit spielbar!",
+  loungePlayOfflineBtn: "Offline spielen",
+  loungeRetryBtn: "Erneut verbinden",
+  loungeConnecting: "Verbinde mit der Boomergames-Lounge…",
+  loungeRoomLabel: "Raum",
+  loungePlayNow: "Jetzt spielen",
+  loungeCreateTable: "Tisch erstellen",
+  loungeHighscores: "Bestenliste",
+  loungeSignIn: "Anmelden",
+  loungeAccountTitle: "Konto & Avatar",
+  loungeSignInDesc:
+    "Gib deine E-Mail-Adresse für einen passwortlosen Login-Link ein (kein Passwort, keine Cookies).",
+  loungeSendMagicLink: "Login-Link senden",
+  loungeMagicSent: "Falls die Adresse gültig ist, wurde dein Login-Link gesendet (15 Min. gültig).",
+  loungeSignedIn: "Angemeldet!",
+  loungeSaveAccount: "Speichern",
+  loungeLogout: "Abmelden",
+  loungeDeleteAccount: "Konto löschen",
+  loungeDeleteConfirm: "Konto und Statistiken dauerhaft löschen? Dies kann nicht rückgängig gemacht werden.",
+  loungeCancel: "Schließen",
+  loungeTablesTab: "Tische",
+  loungePlayersTab: "Spieler",
+  loungeChatTab: "Chat",
+  loungeTableTab: "Tisch",
+  loungeControlsTab: "Host & Info",
+  loungeRoomChatTitle: "Raum-Chat",
+  loungeTableChatTitle: "Tisch-Chat",
+  loungeChatEmpty: "Noch keine Nachrichten. Sag Hallo!",
+  loungeChatPlaceholder: "Nachricht schreiben (max. 300 Zeichen)…",
+  loungeSendBtn: "Senden",
+  loungeNoTables: "Noch keine offenen Tische. Erstelle einen Tisch oder nutze Jetzt spielen!",
+  loungeOpenSeat: "Frei",
+  loungeRated: "Gewertet",
+  loungeUnrated: "Ungewertet",
+  loungeJoin: "Beitreten",
+  loungeWatch: "Zusehen",
+  loungeFull: "Voll",
+  loungeInviteBtn: "Einladen",
+  loungeIgnore: "Ignorieren",
+  loungeUnignore: "Nicht ignorieren",
+  loungeInviteFrom: "Tischeinladung von",
+  loungeAccept: "Annehmen",
+  loungeDecline: "Ablehnen",
+  loungePlayNowWaiting: "Suche einen passenden Gegner in deiner Wertung…",
+  loungePlayNowTimeout: "Noch kein menschlicher Gegner gefunden — direkt gegen den Computer spielen?",
+  loungeCopyLink: "Link kopieren",
+  loungeLinkCopied: "Kopiert!",
+  loungeLeaveTable: "Tisch verlassen",
+  loungeSeat: "Platz",
+  loungeReadyBadge: "Bereit",
+  loungeNotReadyBadge: "Wartet",
+  loungeWaitingPlayer: "Wartet auf Spieler…",
+  loungeSitDown: "Hinsetzen",
+  loungeStandUp: "Aufstehen",
+  loungeReadyBtn: "Bereit / Start",
+  loungeUnreadyBtn: "Nicht bereit",
+  loungeBoot: "Entfernen",
+  loungeMuteSpectators: "Zuschauer stumm",
+  loungeUnmuteSpectators: "Zuschauer erlauben",
+  loungeSpectatorsMuted: "Zuschauer stummgeschaltet",
+  loungeSpectatorsOpen: "Zuschauer-Chat aktiv",
+  loungeRemoveBot: "Bot entfernen",
+  loungeSpectators: "Zuschauer",
+  loungeNoSpectators: "Keine Zuschauer am Tisch.",
+  loungeVisPublic: "Öffentlich (alle dürfen spielen)",
+  loungeVisProtected: "Geschützt (Spielen per Einladung)",
+  loungeVisPrivate: "Privat (nur mit Einladung)",
+  loungeCreateConfirm: "Tisch eröffnen",
+  loungeFindMe: "Finde mich",
+  loungeNoHighscores: "Noch keine gewerteten Siege gegen Menschen.",
 };
 
 export function getStrings(lang: string): Strings {

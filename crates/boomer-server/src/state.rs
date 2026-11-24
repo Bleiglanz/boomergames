@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-use boomer_protocol::{GameKindDto, RoomSummaryDto};
+use boomer_protocol::RoomSummaryDto;
 use serde::Serialize;
 use tokio::sync::Mutex;
 
+use crate::actors::hub::LobbyHub;
 use crate::auth::TokenSigner;
 use crate::config::ServerConfig;
 use crate::ports::{
@@ -66,10 +67,12 @@ pub struct AppState {
     pub started_at: Instant,
     /// Live connected client count.
     pub online: Arc<AtomicU32>,
-    /// Live table count (populated by actors in Milestone 5).
+    /// Live table count (updated by `TableActor`s).
     pub tables: Arc<AtomicU32>,
-    /// Live active match count (populated by actors in Milestone 5).
+    /// Live active match count (updated by `TableActor`s).
     pub games: Arc<AtomicU32>,
+    /// Acyclic actor hub managing all lounge rooms and tables.
+    pub hub: Arc<LobbyHub>,
     next_guest_num: Arc<AtomicU32>,
     pub(crate) status_cache: Arc<Mutex<Option<CachedStatus>>>,
 }
@@ -92,6 +95,10 @@ impl AppState {
         mailer: Arc<dyn MailSender>,
         google: Arc<dyn GoogleTokenVerifier>,
     ) -> Self {
+        let online = Arc::new(AtomicU32::new(0));
+        let tables = Arc::new(AtomicU32::new(0));
+        let games = Arc::new(AtomicU32::new(0));
+        let hub = LobbyHub::new(Arc::clone(&online), Arc::clone(&tables), Arc::clone(&games));
         Self {
             config: Arc::new(config),
             signer,
@@ -103,12 +110,26 @@ impl AppState {
             mailer,
             google,
             started_at: Instant::now(),
-            online: Arc::new(AtomicU32::new(0)),
-            tables: Arc::new(AtomicU32::new(0)),
-            games: Arc::new(AtomicU32::new(0)),
+            online,
+            tables,
+            games,
+            hub,
             next_guest_num: Arc::new(AtomicU32::new(1000)),
             status_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Replaces the [`LobbyHub`] with custom capacity/auto-open thresholds (for integration tests).
+    #[must_use]
+    pub fn with_room_limits(mut self, room_capacity: usize, auto_open_threshold: u32) -> Self {
+        self.hub = LobbyHub::with_limits(
+            Arc::clone(&self.online),
+            Arc::clone(&self.tables),
+            Arc::clone(&self.games),
+            room_capacity,
+            auto_open_threshold,
+        );
+        self
     }
 
     /// Allocates a fresh guest number (`Guest_1000`, `Guest_1001`, ...).
@@ -117,25 +138,9 @@ impl AppState {
         self.next_guest_num.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Returns the baseline lounge rooms announced in `welcome` (extended dynamically in Milestone 5).
+    /// Returns all currently open lounge rooms and live occupancy counts.
     #[must_use]
     pub fn default_rooms(&self) -> Vec<RoomSummaryDto> {
-        let online = self.online.load(Ordering::Relaxed);
-        vec![
-            RoomSummaryDto {
-                id: "pool-social-1".to_owned(),
-                game: GameKindDto::Pool,
-                name: "8-Ball Pool · Social Lounge".to_owned(),
-                tier: "social".to_owned(),
-                users: online,
-            },
-            RoomSummaryDto {
-                id: "checkers-social-1".to_owned(),
-                game: GameKindDto::Checkers,
-                name: "Checkers · Social Lounge".to_owned(),
-                tier: "social".to_owned(),
-                users: 0,
-            },
-        ]
+        self.hub.list_rooms()
     }
 }

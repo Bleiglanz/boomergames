@@ -2,8 +2,10 @@ import "./styles/classic.css";
 
 import { SoundSynth } from "./audio/synth.js";
 import { getStrings, type Strings } from "./i18n/strings.js";
+import { OnlineSession, parseHashIntent } from "./online/session.js";
 import { loadPrefs, savePrefs, type UserPrefs } from "./prefs.js";
 import { StageRenderer } from "./render/renderer.js";
+import { LobbyController } from "./ui/lobby.js";
 import {
   WasmBridge,
   type AimAidLevelDto,
@@ -231,11 +233,34 @@ async function bootstrap(): Promise<void> {
   // Discard any bootstrap cues before first interaction.
   bridge.drainSoundCues();
 
+  const onlineSession = new OnlineSession();
+  const initialIntent = parseHashIntent();
+  let onlineView =
+    initialIntent.loginToken !== undefined || initialIntent.tableId !== undefined;
+  let lobbyController: LobbyController | null = null;
   let mountedShell: MountedShell | null = null;
   let lastScreenKey = "";
   let liveRegion: HTMLElement | null = null;
   let contrastBtnRef: HTMLButtonElement | null = null;
   let lastAnnouncement = "";
+
+  const openOnlineLounge = (intent?: { readonly loginToken?: string; readonly tableId?: string }): void => {
+    onlineView = true;
+    renderApp();
+    void onlineSession.probeBackend().then((available) => {
+      if (available) {
+        onlineSession.connect(intent);
+      }
+    });
+  };
+
+  if (onlineView) {
+    void onlineSession.probeBackend().then((available) => {
+      if (available) {
+        onlineSession.connect(initialIntent);
+      }
+    });
+  }
 
   const persistFromVm = (vm: ViewModel): void => {
     const showNums =
@@ -273,6 +298,10 @@ async function bootstrap(): Promise<void> {
       mountedShell.stage.dispose();
       mountedShell = null;
     }
+    if (lobbyController !== null) {
+      lobbyController.dispose();
+      lobbyController = null;
+    }
   };
 
   const renderApp = (): void => {
@@ -281,10 +310,14 @@ async function bootstrap(): Promise<void> {
     document.documentElement.lang = vm.lang;
     document.documentElement.dataset.contrast = vm.highContrast ? "high" : "standard";
 
-    const screenKey =
-      vm.screen.kind === "home" ? `home:${vm.lang}` : `shell:${vm.screen.game}:${vm.lang}`;
+    const screenKey = onlineView
+      ? `lounge:${vm.lang}`
+      : vm.screen.kind === "home"
+        ? `home:${vm.lang}`
+        : `shell:${vm.screen.game}:${vm.lang}`;
 
     if (
+      !onlineView &&
       vm.screen.kind === "game_shell" &&
       mountedShell !== null &&
       screenKey === lastScreenKey
@@ -331,9 +364,21 @@ async function bootstrap(): Promise<void> {
 
     const controls = document.createElement("div");
     controls.className = "top-controls";
-    if (vm.screen.kind === "game_shell") {
+    if (onlineView) {
       controls.append(
-        makeButton(s.returnHome, () => dispatchAndRender({ kind: "return_home" })),
+        makeButton(s.navOfflinePlay, () => {
+          onlineView = false;
+          renderApp();
+        }),
+      );
+    } else {
+      if (vm.screen.kind === "game_shell") {
+        controls.append(
+          makeButton(s.returnHome, () => dispatchAndRender({ kind: "return_home" })),
+        );
+      }
+      controls.append(
+        makeButton(s.navOnlineLounge, () => openOnlineLounge(), { primary: vm.screen.kind === "home" }),
       );
     }
 
@@ -376,7 +421,15 @@ async function bootstrap(): Promise<void> {
     main.id = "main-content";
     main.className = "main-area";
 
-    if (vm.screen.kind === "home") {
+    if (onlineView) {
+      const loungeHost = document.createElement("div");
+      main.append(loungeHost);
+      root.append(main);
+      lobbyController = new LobbyController(loungeHost, onlineSession, s, () => {
+        onlineView = false;
+        renderApp();
+      });
+    } else if (vm.screen.kind === "home") {
       if (vm.lastError !== null) {
         const errBanner = document.createElement("div");
         errBanner.className = "error-banner";

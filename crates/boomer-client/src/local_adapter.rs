@@ -806,85 +806,56 @@ impl LocalSessionAdapter {
     }
 }
 
+impl LocalSessionAdapter {
+    fn handle_hello(&mut self, v: u32) {
+        if v != PROTOCOL_VERSION {
+            self.push_error(ErrorCode::UpgradeRequired, "hello");
+            return;
+        }
+        self.handshaken = true;
+        self.outbox.push_back(ServerMessage::Welcome {
+            protocol_version: PROTOCOL_VERSION,
+            mode: SessionKindDto::Local,
+            me: None,
+            guest: None,
+            rooms: Vec::new(),
+        });
+        self.outbox.push_back(ServerMessage::SessionState {
+            game: None,
+            mode: None,
+            status: "home_ready".to_owned(),
+        });
+    }
+
+    fn handle_local_leave(&mut self) {
+        self.active_game = None;
+        self.active_mode = None;
+        self.checkers = None;
+        self.pool = None;
+        self.outbox.push_back(ServerMessage::SessionState {
+            game: None,
+            mode: None,
+            status: "home_ready".to_owned(),
+        });
+    }
+}
+
 impl GameTransport for LocalSessionAdapter {
     fn send(&mut self, msg: ClientMessage) -> Result<(), TransportError> {
         match msg {
-            ClientMessage::Hello { v, .. } => {
-                if v != PROTOCOL_VERSION {
-                    self.push_error(ErrorCode::UpgradeRequired, "hello");
-                    return Ok(());
-                }
-                self.handshaken = true;
-                self.outbox.push_back(ServerMessage::Welcome {
-                    protocol_version: PROTOCOL_VERSION,
-                    mode: SessionKindDto::Local,
-                    me: None,
-                    guest: None,
-                    rooms: Vec::new(),
-                });
-                self.outbox.push_back(ServerMessage::SessionState {
-                    game: None,
-                    mode: None,
-                    status: "home_ready".to_owned(),
-                });
-                Ok(())
-            }
-            ClientMessage::LocalStart { game, mode } => {
-                self.handle_local_start(game, mode);
-                Ok(())
-            }
-            ClientMessage::LocalLeave {} => {
-                self.active_game = None;
-                self.active_mode = None;
-                self.checkers = None;
-                self.pool = None;
-                self.outbox.push_back(ServerMessage::SessionState {
-                    game: None,
-                    mode: None,
-                    status: "home_ready".to_owned(),
-                });
-                Ok(())
-            }
-            ClientMessage::CheckersMove { turn, path } => {
-                self.handle_checkers_move(turn, &path);
-                Ok(())
-            }
-            ClientMessage::CheckersSettings { settings } => {
-                self.handle_checkers_settings(settings);
-                Ok(())
-            }
-            ClientMessage::PoolShoot { shot } => {
-                self.handle_pool_shoot(shot);
-                Ok(())
-            }
-            ClientMessage::PoolPlaceCue { x, y } => {
-                self.handle_pool_place_cue(x, y);
-                Ok(())
-            }
-            ClientMessage::PoolSettings { settings } => {
-                self.handle_pool_settings(settings);
-                Ok(())
-            }
-            ClientMessage::PoolRerack {} => {
-                self.handle_pool_rerack();
-                Ok(())
-            }
-            ClientMessage::Resign {} => {
-                self.handle_resign();
-                Ok(())
-            }
-            ClientMessage::DrawOffer {} => {
-                self.handle_draw_offer();
-                Ok(())
-            }
-            ClientMessage::DrawAnswer { accept } => {
-                self.handle_draw_answer(accept);
-                Ok(())
-            }
-            ClientMessage::Rematch {} => {
-                self.handle_rematch();
-                Ok(())
-            }
+            ClientMessage::Hello { v, .. } => self.handle_hello(v),
+            ClientMessage::LocalStart { game, mode } => self.handle_local_start(game, mode),
+            ClientMessage::LocalLeave {} => self.handle_local_leave(),
+            ClientMessage::CheckersMove { turn, path } => self.handle_checkers_move(turn, &path),
+            ClientMessage::CheckersSettings { settings } => self.handle_checkers_settings(settings),
+            ClientMessage::PoolShoot { shot } => self.handle_pool_shoot(shot),
+            ClientMessage::PoolPlaceCue { x, y } => self.handle_pool_place_cue(x, y),
+            ClientMessage::PoolSettings { settings } => self.handle_pool_settings(settings),
+            ClientMessage::PoolRerack {} => self.handle_pool_rerack(),
+            ClientMessage::Resign {} => self.handle_resign(),
+            ClientMessage::DrawOffer {} => self.handle_draw_offer(),
+            ClientMessage::DrawAnswer { accept } => self.handle_draw_answer(accept),
+            ClientMessage::Rematch {} => self.handle_rematch(),
             ClientMessage::AuthEmail { .. }
             | ClientMessage::AuthMagic { .. }
             | ClientMessage::AuthGoogle { .. }
@@ -892,11 +863,27 @@ impl GameTransport for LocalSessionAdapter {
             | ClientMessage::AccountUpdate { .. }
             | ClientMessage::AccountDelete {}
             | ClientMessage::ProfileGet { .. }
-            | ClientMessage::HighscoresGet { .. } => {
+            | ClientMessage::HighscoresGet { .. }
+            | ClientMessage::LobbyJoin { .. }
+            | ClientMessage::ChatSend { .. }
+            | ClientMessage::TableCreate(_)
+            | ClientMessage::TableJoin { .. }
+            | ClientMessage::TableLeave {}
+            | ClientMessage::PlayNow { .. }
+            | ClientMessage::InviteSend { .. }
+            | ClientMessage::InviteAnswer { .. }
+            | ClientMessage::IgnoreSet { .. }
+            | ClientMessage::Ready {}
+            | ClientMessage::SettingsSet(_)
+            | ClientMessage::SeatTake { .. }
+            | ClientMessage::SeatLeave {}
+            | ClientMessage::Boot { .. }
+            | ClientMessage::BotAdd { .. }
+            | ClientMessage::BotRemove {} => {
                 self.push_error(ErrorCode::NotAllowed, "offline");
-                Ok(())
             }
         }
+        Ok(())
     }
 
     fn poll_messages(&mut self) -> Vec<ServerMessage> {

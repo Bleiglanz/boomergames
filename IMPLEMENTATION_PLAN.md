@@ -314,18 +314,18 @@ disallowed-methods = [
 
 ### Milestone 5 — Acyclic Actor-Based Lounges, Matchmaking, Tables & Chat
 
-- [ ] **5.1 Actor Concurrency & Backpressure Contract:**
+- [x] **5.1 Actor Concurrency & Backpressure Contract:**
   - **Strict acyclic hierarchy:** `LobbyActor` and `TableActor` never mutually `.await` each other on bounded channels; table-to-lobby state updates are fire-and-forget summaries, while command/reply `oneshot` calls flow strictly downward.
   - **Non-blocking per-client outbound queues:** Actors broadcast via `try_send` into each connection's bounded outbound channel; if a slow client's buffer overflows, that connection is disconnected cleanly rather than stalling the actor.
-- [ ] **5.2 `LobbyActor` (one `tokio` task per room):**
+- [x] **5.2 `LobbyActor` (one `tokio` task per room):**
   - 1–2 initial rooms per game, auto-opening new rooms past ~70% of 100-user capacity.
   - Live User Roster (`Available`, `At Table – Waiting`, `In Game`, `Spectating`), room chat (last 50 lines in memory, 300-char limit, 1 msg/s rate limit, profanity filter), persistent Ignore/Mute list.
   - Table list CRUD (`Public`, `Protected`, `Private`), 30s-expiring Direct Invites, `Play Now` (±200 Elo widening window + 20s human-first wait before bot suggestion).
-- [ ] **5.3 `TableActor` (one `tokio` task per table, zero shared locks):**
+- [x] **5.3 `TableActor` (one `tokio` task per table, zero shared locks):**
   - Seat 1 (Host), Seat 2, Spectators, isolated Table Chat, Mute Spectators toggle.
   - Host controls (`Boot` with 5-min block, `Invite`, pre-game settings), `Stand Up`, and shareable table links (`/#table=<id>`).
-- [ ] **5.4 Lounge & Table UI (`web/src/ui/lobby.ts`):**
-  - Classic room selector, live roster, chatbox, table list (`Join`/`Watch`/`Full`), Create Table modal, invite toasts, Ignore/Mute controls.
+- [x] **5.4 Lounge & Table UI (`web/src/ui/lobby.ts`):**
+  - Classic room selector, live roster, chatbox, table list (`Join`/`Watch`/`Full`), Create Table modal, invite toasts, Ignore/Mute controls, with responsive mobile/tablet segmented tabs and ≥44 px touch targets.
 
 **Exit Criteria:** Full multi-user lobby, chat, table creation, invites, and spectating flow works end-to-end without actor deadlocks or slow-client head-of-line blocking.
 

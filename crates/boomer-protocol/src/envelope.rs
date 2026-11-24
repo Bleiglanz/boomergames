@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{HighscoreRowDto, ProfileGameStatDto, ProfileMatchDto, RoomSummaryDto, UserDto};
 use crate::checkers::{CheckersSettingsDto, CheckersStateDto};
+use crate::lobby::{
+    ChatLineDto, ChatScopeDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto, TableRoleDto,
+    TableSettingsDto, TableSnapshotDto, TableSummaryDto, TableUpdateDto,
+};
 use crate::pool::{PoolBallDto, PoolSettingsDto, PoolShotDto, PoolStateDto};
 
 /// Current wire protocol version validated during `hello` handshake.
@@ -225,6 +229,105 @@ pub enum ClientMessage {
         #[serde(default)]
         around: bool,
     },
+    /// Join (or switch into) a lounge room.
+    #[serde(rename = "lobby.join")]
+    LobbyJoin {
+        /// Room identifier (e.g., `"pool-social-1"`).
+        room: String,
+    },
+    /// Send a chat line to the active table or lobby room (≤ 300 chars, 1 msg/s).
+    #[serde(rename = "chat.send")]
+    ChatSend {
+        /// Message text.
+        text: String,
+        /// Optional explicit target (`lobby` or `table`); defaults to `table` when seated/watching.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<ChatScopeDto>,
+    },
+    /// Create a new table in the active lounge and take Seat 1 as host.
+    #[serde(rename = "table.create")]
+    TableCreate(TableSettingsDto),
+    /// Join an existing table as a player or spectator (works via lobby list or `/#table=<id>`).
+    #[serde(rename = "table.join")]
+    TableJoin {
+        /// Target table ID (e.g., `"t1"`).
+        #[serde(rename = "tableId")]
+        table_id: String,
+        /// Requested role (`player` or `spectator`).
+        #[serde(rename = "as")]
+        role: TableRoleDto,
+    },
+    /// Leave the active table and return to the lounge.
+    #[serde(rename = "table.leave")]
+    TableLeave {},
+    /// Quick matchmaking (human-first with ±200 Elo widening & 20s wait, or immediate `vsBot`).
+    #[serde(rename = "play.now")]
+    PlayNow {
+        /// Optional computer opponent difficulty for immediate bot play.
+        #[serde(rename = "vsBot", default, skip_serializing_if = "Option::is_none")]
+        vs_bot: Option<BotLevelDto>,
+    },
+    /// Send a 30-second direct invite to another available user in the room.
+    #[serde(rename = "invite.send")]
+    InviteSend {
+        /// Target user wire ID.
+        to: String,
+        /// Optional existing table ID to invite into.
+        #[serde(rename = "tableId", default, skip_serializing_if = "Option::is_none")]
+        table_id: Option<String>,
+        /// Optional settings for creating a new table on accept.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settings: Option<TableSettingsDto>,
+    },
+    /// Accept or decline a pending direct invite.
+    #[serde(rename = "invite.answer")]
+    InviteAnswer {
+        /// Pending invite identifier.
+        #[serde(rename = "inviteId")]
+        invite_id: String,
+        /// `true` to accept and seat immediately, `false` to decline.
+        accept: bool,
+    },
+    /// Persist ignore/mute preference for another user (`u123` or `g4821`).
+    #[serde(rename = "ignore.set")]
+    IgnoreSet {
+        /// Target user wire ID.
+        #[serde(rename = "userId")]
+        user_id: String,
+        /// `true` to ignore, `false` to unignore.
+        on: bool,
+    },
+    /// Toggle Ready / Start at the active table.
+    #[serde(rename = "ready")]
+    Ready {},
+    /// Update pre-game table settings (host only, `waiting` phase only).
+    #[serde(rename = "settings.set")]
+    SettingsSet(TableSettingsDto),
+    /// Move from spectator into an open seat.
+    #[serde(rename = "seat.take")]
+    SeatTake {
+        /// Desired seat (`1` or `2`).
+        seat: SeatDto,
+    },
+    /// Stand up from a seat and become a spectator at the same table.
+    #[serde(rename = "seat.leave")]
+    SeatLeave {},
+    /// Boot a user from the table with a 5-minute rejoin block (host only).
+    #[serde(rename = "boot")]
+    Boot {
+        /// Target user wire ID.
+        #[serde(rename = "userId")]
+        user_id: String,
+    },
+    /// Fill the open opponent seat with a clearly badged computer bot (host only).
+    #[serde(rename = "bot.add")]
+    BotAdd {
+        /// Bot difficulty tier.
+        level: BotLevelDto,
+    },
+    /// Remove the seated computer bot (host only).
+    #[serde(rename = "bot.remove")]
+    BotRemove {},
 }
 
 /// Messages emitted from transport (`LocalSessionAdapter` or `boomer-server`) to client.
@@ -282,6 +385,99 @@ pub enum ServerMessage {
         game: GameKindDto,
         /// Ordered leaderboard rows.
         rows: Vec<HighscoreRowDto>,
+    },
+    /// Updated list of open lounge rooms (sent when rooms auto-open or counts change).
+    #[serde(rename = "rooms.update")]
+    RoomsUpdate {
+        /// Current room summaries.
+        rooms: Vec<RoomSummaryDto>,
+    },
+    /// Full room snapshot delivered upon `lobby.join`.
+    #[serde(rename = "lobby.snapshot")]
+    LobbySnapshot(Box<LobbySnapshotDto>),
+    /// User joined the current lounge room.
+    #[serde(rename = "user.add")]
+    UserAdd(UserDto),
+    /// User presence or rating changed in the current lounge room.
+    #[serde(rename = "user.update")]
+    UserUpdate(UserDto),
+    /// User left the current lounge room.
+    #[serde(rename = "user.remove")]
+    UserRemove {
+        /// Departed user wire ID.
+        id: String,
+    },
+    /// Table created or updated in the current lounge room.
+    #[serde(rename = "table.upsert")]
+    TableUpsert(Box<TableSummaryDto>),
+    /// Table removed from the current lounge room.
+    #[serde(rename = "table.remove")]
+    TableRemove {
+        /// Closed table ID.
+        id: String,
+    },
+    /// Incoming chat or system line for either lobby or table chat.
+    #[serde(rename = "chat")]
+    Chat {
+        /// Whether this line belongs to the lobby room or active table.
+        scope: ChatScopeDto,
+        /// Chat line payload.
+        #[serde(flatten)]
+        line: ChatLineDto,
+    },
+    /// Direct 30-second invite received from another player.
+    #[serde(rename = "invite.received")]
+    InviteReceived {
+        /// Unique invite identifier.
+        #[serde(rename = "inviteId")]
+        invite_id: String,
+        /// Inviting player.
+        from: UserDto,
+        /// Game kind.
+        game: GameKindDto,
+        /// Optional existing table ID.
+        #[serde(rename = "tableId", default, skip_serializing_if = "Option::is_none")]
+        table_id: Option<String>,
+        /// Proposed table settings.
+        settings: TableSettingsDto,
+        /// Remaining milliseconds before automatic expiry (30 000 ms initially).
+        #[serde(rename = "msLeft")]
+        ms_left: u64,
+    },
+    /// Pending invite declined, expired, or cancelled.
+    #[serde(rename = "invite.closed")]
+    InviteClosed {
+        /// Invite identifier.
+        #[serde(rename = "inviteId")]
+        invite_id: String,
+        /// Closure reason.
+        reason: InviteCloseReasonDto,
+    },
+    /// Caller entered the human-first `Play Now` queue.
+    #[serde(rename = "play.now.queued")]
+    PlayNowQueued {
+        /// Milliseconds before bot suggestion triggers (20 000 ms).
+        #[serde(rename = "msWait")]
+        ms_wait: u64,
+    },
+    /// `Play Now` waited 20 seconds without finding a human opponent; suggests playing a bot.
+    #[serde(rename = "play.now.timeout")]
+    PlayNowTimeout {
+        /// Whether the UI should highlight a one-click computer opponent option.
+        #[serde(rename = "suggestBot")]
+        suggest_bot: bool,
+    },
+    /// Full table state snapshot.
+    #[serde(rename = "table.snapshot")]
+    TableSnapshot(Box<TableSnapshotDto>),
+    /// Incremental table metadata update.
+    #[serde(rename = "table.update")]
+    TableUpdate(Box<TableUpdateDto>),
+    /// Client was booted by the host or the table was closed.
+    #[serde(rename = "kicked")]
+    Kicked {
+        /// Kick reason.
+        reason: KickReasonDto,
     },
     /// Current offline session summary.
     #[serde(rename = "session.state")]

@@ -207,6 +207,37 @@ impl UserRepo for PgRepos {
             Ok(())
         })
     }
+
+    fn set_ignored(
+        &self,
+        user_id: i64,
+        target_id: i64,
+        ignored: bool,
+    ) -> BoxFuture<'_, Result<Vec<i64>, PortError>> {
+        Box::pin(async move {
+            let sql = if ignored {
+                "UPDATE users \
+                 SET ignored_ids = CASE \
+                     WHEN $2 = ANY(ignored_ids) THEN ignored_ids \
+                     ELSE array_append(ignored_ids, $2) \
+                 END \
+                 WHERE id = $1 RETURNING ignored_ids"
+            } else {
+                "UPDATE users \
+                 SET ignored_ids = array_remove(ignored_ids, $2) \
+                 WHERE id = $1 RETURNING ignored_ids"
+            };
+            let row = sqlx::query(sql)
+                .bind(user_id)
+                .bind(target_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?
+                .ok_or(PortError::NotFound)?;
+            row.try_get("ignored_ids")
+                .map_err(|e| PortError::Unavailable(e.to_string()))
+        })
+    }
 }
 
 impl StatsRepo for PgRepos {
