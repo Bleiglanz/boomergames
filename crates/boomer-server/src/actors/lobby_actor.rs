@@ -158,6 +158,11 @@ pub enum LobbyCmd {
         /// `true` to accept, `false` to decline.
         accept: bool,
     },
+    /// Exports recent room chat lines for a moderation report snapshot.
+    DumpChat {
+        /// Reply channel returning formatted chat transcript.
+        reply: oneshot::Sender<String>,
+    },
 }
 
 struct LobbyMember {
@@ -320,6 +325,15 @@ impl LobbyActor {
                 invite_id,
                 accept,
             } => self.handle_answer_invite(&user_id, &invite_id, accept),
+            LobbyCmd::DumpChat { reply } => {
+                let transcript = self
+                    .chat
+                    .iter()
+                    .map(|l| format!("{}: {}", l.name.as_deref().unwrap_or("system"), l.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let _ = reply.send(transcript);
+            }
         }
     }
 
@@ -485,11 +499,13 @@ impl LobbyActor {
         let Some(host_client) = self.build_table_client(user_id) else {
             return;
         };
-        if self
-            .members
-            .get(user_id)
-            .and_then(|m| m.active_table.as_ref())
-            .is_some()
+        if self.hub.is_draining()
+            || self.hub.is_abandon_cooldown(user_id)
+            || self
+                .members
+                .get(user_id)
+                .and_then(|m| m.active_table.as_ref())
+                .is_some()
         {
             let _ = host_client.sink.send_msg(&ServerMessage::Error {
                 code: ErrorCode::NotAllowed,
@@ -505,11 +521,13 @@ impl LobbyActor {
         let Some(caller) = self.build_table_client(user_id) else {
             return;
         };
-        if self
-            .members
-            .get(user_id)
-            .and_then(|m| m.active_table.as_ref())
-            .is_some()
+        if self.hub.is_draining()
+            || self.hub.is_abandon_cooldown(user_id)
+            || self
+                .members
+                .get(user_id)
+                .and_then(|m| m.active_table.as_ref())
+                .is_some()
         {
             let _ = caller.sink.send_msg(&ServerMessage::Error {
                 code: ErrorCode::NotAllowed,

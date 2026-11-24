@@ -623,6 +623,14 @@ export class OnlineSession {
         }
         break;
       }
+      case "game.pause": {
+        this.state.authNotice = "opponent_disconnected_paused";
+        break;
+      }
+      case "game.resume": {
+        this.state.authNotice = null;
+        break;
+      }
       case "invite.received": {
         const inv = d as unknown as PendingInviteView;
         this.state.pendingInvites = [

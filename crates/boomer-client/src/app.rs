@@ -792,7 +792,10 @@ impl<T: GameTransport> ClientApp<T> {
                 | ServerMessage::TableUpdate(_)
                 | ServerMessage::Kicked { .. }
                 | ServerMessage::GameOver(_)
-                | ServerMessage::RematchState { .. } => {
+                | ServerMessage::RematchState { .. }
+                | ServerMessage::GamePause { .. }
+                | ServerMessage::GameResume {}
+                | ServerMessage::ReportSaved { .. } => {
                     // Handled by the Step 2 online lounge session controller.
                     self.dirty = true;
                 }

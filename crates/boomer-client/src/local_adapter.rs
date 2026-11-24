@@ -879,7 +879,11 @@ impl GameTransport for LocalSessionAdapter {
             | ClientMessage::SeatLeave {}
             | ClientMessage::Boot { .. }
             | ClientMessage::BotAdd { .. }
-            | ClientMessage::BotRemove {} => {
+            | ClientMessage::BotRemove {}
+            | ClientMessage::Report { .. }
+            | ClientMessage::ModMute { .. }
+            | ClientMessage::ModBan { .. }
+            | ClientMessage::ModCloseTable { .. } => {
                 self.push_error(ErrorCode::NotAllowed, "offline");
             }
         }

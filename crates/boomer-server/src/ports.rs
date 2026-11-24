@@ -157,6 +157,20 @@ pub trait UserRepo: Send + Sync {
         target_id: i64,
         ignored: bool,
     ) -> BoxFuture<'_, Result<Vec<i64>, PortError>>;
+
+    /// Sets a user's `muted_until` timestamp (moderation tool).
+    fn set_mute(
+        &self,
+        user_id: i64,
+        until: Option<DateTime<Utc>>,
+    ) -> BoxFuture<'_, Result<(), PortError>>;
+
+    /// Sets a user's `banned_until` timestamp and increments `session_version` to invalidate active tokens.
+    fn set_ban(
+        &self,
+        user_id: i64,
+        until: Option<DateTime<Utc>>,
+    ) -> BoxFuture<'_, Result<(), PortError>>;
 }
 
 /// Port for per-game player ratings and the High Score leaderboard.

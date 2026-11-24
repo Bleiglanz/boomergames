@@ -285,6 +285,27 @@ pub enum TableCmd {
         /// Persisted Elo and High Score outcome.
         outcome: RecordMatchOutcome,
     },
+    /// Socket dropped: triggers 45s `PAUSED_DISCONNECT` grace period if seated in a running game.
+    Disconnect {
+        /// Disconnected user wire ID.
+        user_id: String,
+    },
+    /// Socket reconnected within grace period: swaps sink, sends snapshot, and resumes match.
+    Reconnect {
+        /// Reconnecting user wire ID.
+        user_id: String,
+        /// Fresh non-blocking outbound sink.
+        sink: ClientSink,
+        /// Reply returning `(table_snapshot, optional_game_snapshot)`.
+        reply: oneshot::Sender<Option<(TableSnapshotDto, Option<ServerMessage>)>>,
+    },
+    /// Moderator action: forcibly close this table and kick all participants.
+    ForceClose,
+    /// Exports recent table chat lines for a moderation report snapshot.
+    DumpChat {
+        /// Reply channel returning formatted chat transcript.
+        reply: oneshot::Sender<String>,
+    },
 }
 
 /// Authoritative actor owning a single table's state with zero shared locks.
@@ -306,6 +327,8 @@ pub struct TableActor {
     match_index: u32,
     is_house_bot: bool,
     house_bot_level: Option<BotLevelDto>,
+    disconnected_seat: Option<(usize, Instant)>,
+    force_closed: bool,
     booted_until: HashMap<String, Instant>,
     invited_ids: HashSet<String>,
     self_tx: mpsc::Sender<TableCmd>,
@@ -376,6 +399,8 @@ impl TableActor {
             } else {
                 None
             },
+            disconnected_seat: None,
+            force_closed: false,
             booted_until: HashMap::new(),
             invited_ids: HashSet::new(),
             self_tx: tx.clone(),
@@ -397,9 +422,10 @@ impl TableActor {
     }
 
     async fn run(mut self) {
-        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        let mut ticker = tokio::time::interval(Duration::from_millis(250));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         ticker.tick().await;
+        let mut subticks: u8 = 0;
 
         loop {
             tokio::select! {
@@ -412,7 +438,11 @@ impl TableActor {
                     }
                 }
                 _ = ticker.tick() => {
-                    self.on_tick_one_sec();
+                    self.check_disconnect_expiry();
+                    subticks = subticks.wrapping_add(1);
+                    if subticks.is_multiple_of(4) {
+                        self.on_tick_one_sec();
+                    }
                 }
             }
         }
@@ -461,12 +491,134 @@ impl TableActor {
             TableCmd::MatchPersisted { finish, outcome } => {
                 self.handle_match_persisted(&finish, &outcome);
             }
+            TableCmd::Disconnect { user_id } => self.handle_disconnect(&user_id),
+            TableCmd::Reconnect {
+                user_id,
+                sink,
+                reply,
+            } => {
+                let res = self.handle_reconnect(&user_id, sink);
+                let _ = reply.send(res);
+            }
+            TableCmd::ForceClose => {
+                self.force_closed = true;
+                return false;
+            }
+            TableCmd::DumpChat { reply } => {
+                let transcript = self
+                    .chat
+                    .iter()
+                    .map(|l| format!("{}: {}", l.name.as_deref().unwrap_or("system"), l.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let _ = reply.send(transcript);
+            }
         }
-        self.is_house_bot || self.human_count() > 0
+        !self.force_closed && (self.is_house_bot || self.human_count() > 0)
+    }
+
+    fn check_disconnect_expiry(&mut self) {
+        let Some((seat_idx, since)) = self.disconnected_seat else {
+            return;
+        };
+        if since.elapsed() < self.hub.disconnect_grace() {
+            return;
+        }
+        self.disconnected_seat = None;
+        let loser_wire_id = self
+            .seats
+            .get(seat_idx)
+            .and_then(|s| s.as_ref())
+            .map(SeatOccupant::wire_id);
+        let finish = {
+            let Some(game) = self.active_game.as_mut() else {
+                return;
+            };
+            if game.resign(seat_idx).is_err() {
+                return;
+            }
+            game.finish_info().map(|mut info| {
+                "disconnect".clone_into(&mut info.reason);
+                info
+            })
+        };
+        if let Some(info) = finish {
+            self.push_system_chat("Disconnected player did not return in time (forfeit).");
+            self.on_game_finished(info);
+        }
+        if let Some(uid) = loser_wire_id {
+            self.hub.record_abandonment(&uid);
+            self.hub.clear_user_table(&uid, &self.id);
+            if let Some(slot) = self.seats.get_mut(seat_idx) {
+                *slot = None;
+            }
+            self.emit_presence(&uid, UserStatusDto::Available, None);
+        }
+        self.broadcast_update();
+        self.emit_summary();
+    }
+
+    fn handle_disconnect(&mut self, user_id: &str) {
+        if self.phase == TablePhaseDto::Playing
+            && let Some(seat_idx) = self.find_human_seat(user_id)
+        {
+            self.disconnected_seat = Some((seat_idx, Instant::now()));
+            let seat_dto = if seat_idx == 0 {
+                SeatDto::One
+            } else {
+                SeatDto::Two
+            };
+            let ms_left = u64::try_from(self.hub.disconnect_grace().as_millis()).unwrap_or(45_000);
+            self.push_system_chat("Player disconnected — waiting 45s for reconnect…");
+            self.broadcast_table_msg(&ServerMessage::GamePause {
+                seat: seat_dto,
+                ms_left,
+            });
+            return;
+        }
+        self.handle_leave(user_id);
+    }
+
+    fn handle_reconnect(
+        &mut self,
+        user_id: &str,
+        sink: ClientSink,
+    ) -> Option<(TableSnapshotDto, Option<ServerMessage>)> {
+        let mut found_seat: Option<usize> = None;
+        for (idx, occ) in self.seats.iter_mut().enumerate() {
+            if let Some(SeatOccupant::Human(client)) = occ
+                && client.user.id == user_id
+            {
+                client.sink = sink.clone();
+                found_seat = Some(idx);
+                break;
+            }
+        }
+        if found_seat.is_none()
+            && let Some(watcher) = self.watchers.get_mut(user_id)
+        {
+            watcher.sink = sink;
+        } else if found_seat.is_none() {
+            return None;
+        }
+
+        if let Some(seat_idx) = found_seat
+            && self.disconnected_seat.is_some_and(|(s, _)| s == seat_idx)
+        {
+            self.disconnected_seat = None;
+            self.push_system_chat("Player reconnected — match resumed.");
+            self.broadcast_table_msg(&ServerMessage::GameResume {});
+        }
+
+        let game_snap = self
+            .active_game
+            .as_ref()
+            .map(|g| g.snapshot_message(self.bot_thinking));
+        Some((self.snapshot(), game_snap))
     }
 
     fn on_tick_one_sec(&mut self) {
-        if self.phase != TablePhaseDto::Playing {
+        if self.phase != TablePhaseDto::Playing || self.disconnected_seat.is_some() {
             return;
         }
         let (snap, finish) = {
@@ -673,7 +825,7 @@ impl TableActor {
             self.send_error_to(user_id, ErrorCode::NotAllowed, "ready");
             return;
         };
-        if self.phase != TablePhaseDto::Waiting {
+        if self.phase != TablePhaseDto::Waiting || self.hub.is_draining() {
             self.send_error_to(user_id, ErrorCode::NotAllowed, "ready");
             return;
         }

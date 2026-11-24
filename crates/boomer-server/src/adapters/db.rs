@@ -242,6 +242,46 @@ impl UserRepo for PgRepos {
                 .map_err(|e| PortError::Unavailable(e.to_string()))
         })
     }
+
+    fn set_mute(
+        &self,
+        user_id: i64,
+        until: Option<DateTime<Utc>>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let res = sqlx::query("UPDATE users SET muted_until = $2 WHERE id = $1")
+                .bind(user_id)
+                .bind(until)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            if res.rows_affected() == 0 {
+                return Err(PortError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    fn set_ban(
+        &self,
+        user_id: i64,
+        until: Option<DateTime<Utc>>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let res = sqlx::query(
+                "UPDATE users SET banned_until = $2, session_version = session_version + 1 WHERE id = $1",
+            )
+            .bind(user_id)
+            .bind(until)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            if res.rows_affected() == 0 {
+                return Err(PortError::NotFound);
+            }
+            Ok(())
+        })
+    }
 }
 
 impl StatsRepo for PgRepos {

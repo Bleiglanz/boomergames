@@ -33,7 +33,7 @@ use crate::state::AppState;
 const MAX_MESSAGE_BYTES: usize = 4_096;
 
 /// Bounded per-client outbound buffer; slow clients overflowing it are disconnected cleanly.
-const OUTBOUND_QUEUE_CAP: usize = 64;
+const OUTBOUND_QUEUE_CAP: usize = 256;
 
 /// Server keepalive ping interval (`20 s`).
 const PING_INTERVAL: Duration = Duration::from_secs(20);
@@ -161,12 +161,38 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     state.hub.register_connection(session.sink.clone());
+    attempt_table_reconnect(&mut session, &state).await;
     run_message_loop(&mut ws_rx, &mut session, &state).await;
-    cleanup_session(&session, &state);
+    cleanup_session(&session, &state, true);
 
     let _ = out_tx.try_send(Message::Close(None));
     drop(out_tx);
     let _ = writer.await;
+}
+
+async fn attempt_table_reconnect(session: &mut ConnSession, state: &AppState) {
+    let Some(tid) = state.hub.user_table(&session.user.id) else {
+        return;
+    };
+    let Some(table) = state.hub.find_table(&tid) else {
+        return;
+    };
+    let _ = join_lobby_room(&table.room_id, false, session, state).await;
+    let (tx, rx) = oneshot::channel();
+    if table
+        .send(TableCmd::Reconnect {
+            user_id: session.user.id.clone(),
+            sink: session.sink.clone(),
+            reply: tx,
+        })
+        .await
+        && let Ok(Some((table_snap, game_snap))) = rx.await
+    {
+        let _ = session.send_msg(&ServerMessage::TableSnapshot(Box::new(table_snap)));
+        if let Some(gs) = game_snap {
+            let _ = session.send_msg(&gs);
+        }
+    }
 }
 
 async fn run_message_loop(
@@ -245,13 +271,19 @@ async fn handle_ws_frame(
     }
 }
 
-fn cleanup_session(session: &ConnSession, state: &AppState) {
+fn cleanup_session(session: &ConnSession, state: &AppState, is_disconnect: bool) {
     if let Some(tid) = state.hub.user_table(&session.user.id)
         && let Some(table) = state.hub.find_table(&tid)
     {
-        table.try_send(TableCmd::Leave {
-            user_id: session.user.id.clone(),
-        });
+        if is_disconnect {
+            table.try_send(TableCmd::Disconnect {
+                user_id: session.user.id.clone(),
+            });
+        } else {
+            table.try_send(TableCmd::Leave {
+                user_id: session.user.id.clone(),
+            });
+        }
     }
     if let Some(ref rid) = session.active_room
         && let Some(room) = state.hub.find_room(rid)
@@ -624,9 +656,167 @@ async fn handle_game_action_message(
             )
             .await
         }
+        ClientMessage::Report { user_id, reason } => {
+            handle_report(&user_id, &reason, session, state).await
+        }
+        ClientMessage::ModMute { user_id, minutes } => {
+            handle_mod_mute(&user_id, minutes, session, state).await
+        }
+        ClientMessage::ModBan { user_id, hours } => {
+            handle_mod_ban(&user_id, hours, session, state).await
+        }
+        ClientMessage::ModCloseTable { table_id } => {
+            handle_mod_close_table(&table_id, session, state).await
+        }
         ClientMessage::Hello { .. } => session.send_error(ErrorCode::NotAllowed, "hello"),
         _ => session.send_error(ErrorCode::NotAllowed, "unsupported"),
     }
+}
+
+async fn handle_report(
+    target_wire_id: &str,
+    reason: &str,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() || trimmed.len() > 300 {
+        return session.send_error(ErrorCode::Invalid, "report");
+    }
+    let reporter_id = match session.identity {
+        ConnIdentity::Registered { user_id } => Some(user_id),
+        ConnIdentity::Guest => None,
+    };
+    let target_id = parse_user_id(target_wire_id);
+    let chat_snapshot = capture_recent_chat(session, state).await;
+    match state
+        .reports
+        .create_report(
+            reporter_id,
+            target_id,
+            target_wire_id,
+            trimmed,
+            chat_snapshot.as_deref(),
+        )
+        .await
+    {
+        Ok(id) => session.send_msg(&ServerMessage::ReportSaved { id }),
+        Err(_) => session.send_error(ErrorCode::Invalid, "report"),
+    }
+}
+
+async fn capture_recent_chat(session: &ConnSession, state: &AppState) -> Option<String> {
+    if let Some(table) = active_table_handle(session, state) {
+        let (tx, rx) = oneshot::channel();
+        if table.send(TableCmd::DumpChat { reply: tx }).await
+            && let Ok(log) = rx.await
+            && !log.is_empty()
+        {
+            return Some(log);
+        }
+    }
+    if let Some(room) = active_room_handle(session, state) {
+        let (tx, rx) = oneshot::channel();
+        if room.send(LobbyCmd::DumpChat { reply: tx }).await
+            && let Ok(log) = rx.await
+            && !log.is_empty()
+        {
+            return Some(log);
+        }
+    }
+    None
+}
+
+async fn is_caller_moderator(session: &ConnSession, state: &AppState) -> bool {
+    let ConnIdentity::Registered { user_id } = session.identity else {
+        return false;
+    };
+    state
+        .users
+        .find_by_id(user_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|u| u.is_moderator)
+}
+
+async fn handle_mod_mute(
+    target_wire_id: &str,
+    minutes: u32,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    if !is_caller_moderator(session, state).await {
+        return session.send_error(ErrorCode::NotAllowed, "mod.mute");
+    }
+    let Some(target_uid) = parse_user_id(target_wire_id) else {
+        return session.send_error(ErrorCode::Invalid, "mod.mute");
+    };
+    let until = if minutes == 0 {
+        None
+    } else {
+        Some(Utc::now() + chrono::Duration::minutes(i64::from(minutes)))
+    };
+    if state.users.set_mute(target_uid, until).await.is_err() {
+        return session.send_error(ErrorCode::Invalid, "mod.mute");
+    }
+    if let Ok(Some(target_user)) = state.users.find_by_id(target_uid).await {
+        let dto = user_record_to_dto(&target_user, 1200, 0, UserStatusDto::Available);
+        let muted_now = until.is_some();
+        if let Some(room) = active_room_handle(session, state) {
+            room.try_send(LobbyCmd::UpdateUser {
+                user: dto.clone(),
+                ignored: ignored_wire_set(&target_user),
+                muted: muted_now,
+            });
+        }
+        if let Some(tid) = state.hub.user_table(target_wire_id)
+            && let Some(table) = state.hub.find_table(&tid)
+        {
+            table.try_send(TableCmd::UpdateMemberUser {
+                user: dto,
+                muted: muted_now,
+            });
+        }
+    }
+    true
+}
+
+async fn handle_mod_ban(
+    target_wire_id: &str,
+    hours: u32,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    if !is_caller_moderator(session, state).await {
+        return session.send_error(ErrorCode::NotAllowed, "mod.ban");
+    }
+    let Some(target_uid) = parse_user_id(target_wire_id) else {
+        return session.send_error(ErrorCode::Invalid, "mod.ban");
+    };
+    let until = if hours == 0 {
+        None
+    } else {
+        Some(Utc::now() + chrono::Duration::hours(i64::from(hours)))
+    };
+    if state.users.set_ban(target_uid, until).await.is_err() {
+        return session.send_error(ErrorCode::Invalid, "mod.ban");
+    }
+    if until.is_some() {
+        state.hub.force_disconnect_user(target_wire_id);
+    }
+    true
+}
+
+async fn handle_mod_close_table(table_id: &str, session: &ConnSession, state: &AppState) -> bool {
+    if !is_caller_moderator(session, state).await {
+        return session.send_error(ErrorCode::NotAllowed, "mod.close_table");
+    }
+    let Some(table) = state.hub.find_table(table_id) else {
+        return session.send_error(ErrorCode::Invalid, "mod.close_table");
+    };
+    table.try_send(TableCmd::ForceClose);
+    true
 }
 
 async fn send_table_cmd(session: &ConnSession, state: &AppState, re: &str, cmd: TableCmd) -> bool {
@@ -679,12 +869,22 @@ fn handle_chat_send(
 }
 
 async fn handle_lobby_join(room_id: &str, session: &mut ConnSession, state: &AppState) -> bool {
+    join_lobby_room(room_id, true, session, state).await
+}
+
+async fn join_lobby_room(
+    room_id: &str,
+    leave_active_table: bool,
+    session: &mut ConnSession,
+    state: &AppState,
+) -> bool {
     let Some(room) = state.hub.find_room(room_id) else {
         return session.send_error(ErrorCode::Invalid, "lobby.join");
     };
 
-    // Leave any active table and previous room when switching rooms.
-    if let Some(tid) = state.hub.user_table(&session.user.id)
+    // Leave any active table and previous room when switching rooms explicitly.
+    if leave_active_table
+        && let Some(tid) = state.hub.user_table(&session.user.id)
         && let Some(table) = state.hub.find_table(&tid)
     {
         let _ = table
@@ -915,7 +1115,7 @@ async fn switch_identity(
     state: &AppState,
 ) {
     let previous_room = session.active_room.clone();
-    cleanup_session(session, state);
+    cleanup_session(session, state, false);
 
     session.identity = new_identity;
     session.user = new_user.clone();

@@ -23,7 +23,7 @@ struct MemData {
     users: BTreeMap<i64, UserRecord>,
     stats: BTreeMap<(i64, u8), PlayerStatRecord>,
     matches: Vec<StoredMatch>,
-    reports: Vec<(i64, String, String)>,
+    reports: Vec<(i64, String, String, Option<String>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +76,29 @@ impl MemoryRepos {
     /// Toggles simulated database health (useful for testing `GET /status` 503 degradation).
     pub fn set_healthy(&self, healthy: bool) {
         self.healthy.store(healthy, Ordering::Relaxed);
+    }
+
+    /// Promotes or demotes a user as moderator (useful for integration tests).
+    ///
+    /// # Errors
+    /// Returns [`PortError::NotFound`] if the user does not exist.
+    pub fn set_moderator(&self, user_id: i64, is_mod: bool) -> Result<(), PortError> {
+        let mut guard = self
+            .data
+            .lock()
+            .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+        let user = guard.users.get_mut(&user_id).ok_or(PortError::NotFound)?;
+        user.is_moderator = is_mod;
+        Ok(())
+    }
+
+    /// Returns a snapshot of recorded moderation reports `(id, target_name, reason, chat_log)`.
+    #[must_use]
+    pub fn reports(&self) -> Vec<(i64, String, String, Option<String>)> {
+        self.data
+            .lock()
+            .map(|guard| guard.reports.clone())
+            .unwrap_or_default()
     }
 
     /// Seeds a player stat row (useful for unit/integration tests).
@@ -287,6 +310,39 @@ impl UserRepo for MemoryRepos {
                 user.ignored_ids.retain(|&id| id != target_id);
             }
             Ok(user.ignored_ids.clone())
+        })
+    }
+
+    fn set_mute(
+        &self,
+        user_id: i64,
+        until: Option<DateTime<Utc>>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            let user = guard.users.get_mut(&user_id).ok_or(PortError::NotFound)?;
+            user.muted_until = until;
+            Ok(())
+        })
+    }
+
+    fn set_ban(
+        &self,
+        user_id: i64,
+        until: Option<DateTime<Utc>>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            let user = guard.users.get_mut(&user_id).ok_or(PortError::NotFound)?;
+            user.banned_until = until;
+            user.session_version = user.session_version.saturating_add(1);
+            Ok(())
         })
     }
 }
@@ -638,17 +694,18 @@ impl ReportRepo for MemoryRepos {
         _reported_id: Option<i64>,
         reported_name: &str,
         reason: &str,
-        _chat_log: Option<&str>,
+        chat_log: Option<&str>,
     ) -> BoxFuture<'_, Result<i64, PortError>> {
         let reported_name = reported_name.to_owned();
         let reason = reason.to_owned();
+        let chat_log = chat_log.map(str::to_owned);
         Box::pin(async move {
             let id = self.next_report_id.fetch_add(1, Ordering::Relaxed);
             let mut guard = self
                 .data
                 .lock()
                 .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
-            guard.reports.push((id, reported_name, reason));
+            guard.reports.push((id, reported_name, reason, chat_log));
             Ok(id)
         })
     }

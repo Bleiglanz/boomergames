@@ -328,6 +328,40 @@ pub enum ClientMessage {
     /// Remove the seated computer bot (host only).
     #[serde(rename = "bot.remove")]
     BotRemove {},
+    /// Report another user for abuse; server attaches in-memory chat log.
+    #[serde(rename = "report")]
+    Report {
+        /// Reported user wire ID.
+        #[serde(rename = "userId")]
+        user_id: String,
+        /// Short abuse reason.
+        reason: String,
+    },
+    /// Moderator action: mute a user for `minutes`.
+    #[serde(rename = "mod.mute")]
+    ModMute {
+        /// Target user wire ID.
+        #[serde(rename = "userId")]
+        user_id: String,
+        /// Duration in minutes.
+        minutes: u32,
+    },
+    /// Moderator action: ban a user for `hours` (increments `session_version`).
+    #[serde(rename = "mod.ban")]
+    ModBan {
+        /// Target user wire ID.
+        #[serde(rename = "userId")]
+        user_id: String,
+        /// Duration in hours.
+        hours: u32,
+    },
+    /// Moderator action: forcibly close an active table.
+    #[serde(rename = "mod.close_table")]
+    ModCloseTable {
+        /// Table ID to close.
+        #[serde(rename = "tableId")]
+        table_id: String,
+    },
 }
 
 /// Messages emitted from transport (`LocalSessionAdapter` or `boomer-server`) to client.
@@ -487,6 +521,24 @@ pub enum ServerMessage {
     RematchState {
         /// Ready-for-rematch flags per seat.
         ready: [bool; 2],
+    },
+    /// Match paused while a disconnected seated player is within the 45-second grace period.
+    #[serde(rename = "game.pause")]
+    GamePause {
+        /// Seat that disconnected.
+        seat: SeatDto,
+        /// Remaining grace period milliseconds (`45_000` initially).
+        #[serde(rename = "msLeft")]
+        ms_left: u64,
+    },
+    /// Match resumed after the disconnected seated player reconnected in time.
+    #[serde(rename = "game.resume")]
+    GameResume {},
+    /// Confirmation that a moderation report was recorded.
+    #[serde(rename = "report.saved")]
+    ReportSaved {
+        /// Persisted report ID.
+        id: i64,
     },
     /// Current offline session summary.
     #[serde(rename = "session.state")]

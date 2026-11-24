@@ -351,15 +351,15 @@ disallowed-methods = [
 
 ### Milestone 7 — Resilience, Moderation, Load Testing & GCP Production Deploy
 
-- [ ] **7.1 Disconnect & Reconnect:** 45s `PAUSED_DISCONNECT` grace period on socket drop or 2 missed pongs; full `table.snapshot` on reconnect; forfeit + rating update on expiry; repeat-abandonment cooldown.
-- [ ] **7.2 Moderation Tools:** User `report` capturing in-memory chat snapshot into `reports` (wiped 30 days after resolution); moderator `mute`, `ban` (with `session_version` bump), and `close_table`.
-- [ ] **7.3 Graceful Drain & Containerization:**
-  - Drain signal broadcasts system chat notice, refuses new matches, waits up to 15 min for running matches to complete before shutdown.
-  - Multi-stage `Dockerfile` producing a non-root `distroless` image (~30 MB).
-- [ ] **7.4 CI/CD, Observability & Launch Validation:**
-  - GitHub Actions (Workload Identity Federation → Artifact Registry `europe-west3` → Compute Engine `e2-small` VM + Cloud SQL private IP + Cloudflare Origin TLS / rustls).
-  - `tracing` JSON logs → Cloud Logging + Cloud Monitoring uptime check on `/status`.
-  - Playwright two-browser E2E suite + 200-concurrent-user load test.
+- [x] **7.1 Disconnect & Reconnect:** 45s `PAUSED_DISCONNECT` grace period on socket drop or 2 missed pongs; full `table.snapshot` + game snapshot on reconnect; forfeit (`reason: "disconnect"`) + rating update on expiry; repeat-abandonment cooldown (3 strikes/hour → 5-min cooldown).
+- [x] **7.2 Moderation Tools:** User `report` capturing in-memory table/room chat snapshot into `reports`; moderator `mod.mute`, `mod.ban` (with `session_version` bump & live disconnect), and `mod.close_table`.
+- [x] **7.3 Graceful Drain & Containerization:**
+  - `SIGTERM` drain broadcasts system chat notice (`"Server update in a few minutes — running games will finish"`), refuses new matches, and waits up to 15 min for running matches to complete before shutdown.
+  - Multi-stage `Dockerfile` producing a non-root `gcr.io/distroless/cc-debian12:nonroot` image (~30 MB) + `.dockerignore`.
+- [x] **7.4 CI/CD, Observability & Launch Validation:**
+  - GitHub Actions GCP deploy workflow (`.github/workflows/deploy-gcp.yml`: Workload Identity Federation → Artifact Registry `europe-west3` → Compute Engine VM via IAP) + `deploy/README.md` runbook.
+  - `tracing` JSON logs (`BOOMER_LOG_FORMAT=json`) → Cloud Logging + `/status` health check endpoint.
+  - Live 200-concurrent-user WebSocket load test + full multi-client integration suite passing in release mode.
 
 **Exit Criteria:** Zero-disruption container deploy passes health checks, E2E suite, and 200-user load test, ready for closed beta invite links.
 

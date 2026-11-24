@@ -80,6 +80,12 @@ impl ClientSink {
         };
         self.send_frame(Message::Text(json.into()))
     }
+
+    /// Forces the underlying WebSocket connection to disconnect cleanly (used on moderator ban).
+    pub fn force_disconnect(&self) {
+        self.slow_disconnect.store(true, Ordering::Release);
+        self.disconnect_notify.notify_one();
+    }
 }
 
 /// Serializes `msg` once and broadcasts it via non-blocking `try_send` to every sink.

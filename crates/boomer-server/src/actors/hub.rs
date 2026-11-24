@@ -2,10 +2,12 @@
 //! bounded bot AI worker semaphore, and match persistence handle.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
-use boomer_protocol::{GameKindDto, RoomSummaryDto, ServerMessage};
+use boomer_protocol::{ChatLineDto, ChatScopeDto, GameKindDto, RoomSummaryDto, ServerMessage};
+use chrono::Utc;
 use tokio::sync::Semaphore;
 
 use crate::actors::lobby_actor::{LobbyActor, LobbyHandle};
@@ -21,6 +23,18 @@ pub const DEFAULT_AUTO_OPEN_THRESHOLD: u32 = 70;
 
 /// Maximum concurrent blocking AI searches across all tables (`spawn_blocking` worker cap).
 const BOT_WORKER_PERMITS: usize = 4;
+
+/// Default disconnect grace period (`45 s` per `incubation/plan.md` G-7 / Milestone 7.1).
+pub const DEFAULT_DISCONNECT_GRACE: Duration = Duration::from_secs(45);
+
+/// Window for tracking repeat match abandonments (1 hour).
+const ABANDON_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+/// Number of abandonments within [`ABANDON_WINDOW`] triggering a 5-minute cooldown.
+const ABANDON_STRIKE_LIMIT: usize = 3;
+
+/// Matchmaking cooldown after repeat abandonments (5 minutes).
+const ABANDON_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 struct RoomEntry {
     summary: RoomSummaryDto,
@@ -46,6 +60,10 @@ pub struct LobbyHub {
     games_count: Arc<AtomicU32>,
     matches: Arc<dyn MatchRepo>,
     bot_semaphore: Arc<Semaphore>,
+    draining: AtomicBool,
+    disconnect_grace: RwLock<Duration>,
+    abandon_history: RwLock<HashMap<String, Vec<Instant>>>,
+    abandon_cooldown_until: RwLock<HashMap<String, Instant>>,
 }
 
 impl LobbyHub {
@@ -92,6 +110,10 @@ impl LobbyHub {
             games_count,
             matches,
             bot_semaphore: Arc::new(Semaphore::new(BOT_WORKER_PERMITS)),
+            draining: AtomicBool::new(false),
+            disconnect_grace: RwLock::new(DEFAULT_DISCONNECT_GRACE),
+            abandon_history: RwLock::new(HashMap::new()),
+            abandon_cooldown_until: RwLock::new(HashMap::new()),
         });
 
         hub.open_next_room(GameKindDto::Pool);
@@ -297,5 +319,87 @@ impl LobbyHub {
                 Err(actual) => cur = actual,
             }
         }
+    }
+
+    /// Returns the number of currently running matches across all tables.
+    #[must_use]
+    pub fn games_count(&self) -> u32 {
+        self.games_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the configured disconnect grace period (`45 s` in production).
+    #[must_use]
+    pub fn disconnect_grace(&self) -> Duration {
+        self.disconnect_grace
+            .read()
+            .map_or(DEFAULT_DISCONNECT_GRACE, |g| *g)
+    }
+
+    /// Overrides the disconnect grace period (used by integration tests).
+    pub fn set_disconnect_grace(&self, grace: Duration) {
+        if let Ok(mut guard) = self.disconnect_grace.write() {
+            *guard = grace;
+        }
+    }
+
+    /// Returns `true` when the server is draining for deployment and refusing new games.
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// Initiates graceful deploy drain: refuses new games and broadcasts a system notice to all clients.
+    pub fn begin_drain(&self) {
+        if self.draining.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let notice = ServerMessage::Chat {
+            scope: ChatScopeDto::Lobby,
+            line: ChatLineDto {
+                from: None,
+                name: None,
+                text: "Server update in a few minutes — running games will finish".to_owned(),
+                ts: Utc::now().timestamp_millis(),
+                sys: true,
+            },
+        };
+        if let Ok(guard) = self.connected_sinks.read() {
+            broadcast_msg(guard.values(), &notice);
+        }
+    }
+
+    /// Forcibly disconnects an online user's active WebSocket sink (used on moderator ban).
+    pub fn force_disconnect_user(&self, wire_id: &str) {
+        if let Ok(guard) = self.connected_sinks.read()
+            && let Some(sink) = guard.get(wire_id)
+        {
+            sink.force_disconnect();
+        }
+    }
+
+    /// Records a disconnect-forfeit abandonment strike; after 3 in 1 hour applies a 5-min cooldown.
+    pub fn record_abandonment(&self, wire_id: &str) {
+        let now = Instant::now();
+        let should_cooldown = if let Ok(mut guard) = self.abandon_history.write() {
+            let entry = guard.entry(wire_id.to_owned()).or_default();
+            entry.retain(|&ts| now.duration_since(ts) < ABANDON_WINDOW);
+            entry.push(now);
+            entry.len() >= ABANDON_STRIKE_LIMIT
+        } else {
+            false
+        };
+        if should_cooldown && let Ok(mut guard) = self.abandon_cooldown_until.write() {
+            guard.insert(wire_id.to_owned(), now + ABANDON_COOLDOWN);
+        }
+    }
+
+    /// Returns `true` if `wire_id` is currently serving a repeat-abandonment cooldown.
+    #[must_use]
+    pub fn is_abandon_cooldown(&self, wire_id: &str) -> bool {
+        self.abandon_cooldown_until.read().is_ok_and(|guard| {
+            guard
+                .get(wire_id)
+                .is_some_and(|&until| Instant::now() < until)
+        })
     }
 }

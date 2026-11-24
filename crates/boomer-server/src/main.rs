@@ -97,6 +97,7 @@ async fn main() {
         google,
     );
 
+    let drain_hub = Arc::clone(&state.hub);
     let router = build_router(state);
     let listener = match TcpListener::bind(&config.bind_addr).await {
         Ok(l) => l,
@@ -109,11 +110,26 @@ async fn main() {
     info!(bind = %config.bind_addr, static_dir = %config.static_dir, "boomer-server listening");
 
     if let Err(err) = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(graceful_drain_signal(drain_hub))
         .await
     {
         error!(%err, "axum server terminated with error");
     }
+}
+
+async fn graceful_drain_signal(hub: Arc<boomer_server::LobbyHub>) {
+    shutdown_signal().await;
+    info!("drain signal received: broadcasting notice and waiting for running games (max 15 min)");
+    hub.begin_drain();
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    while hub.games_count() > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    info!(
+        remaining_games = hub.games_count(),
+        "drain complete; shutting down"
+    );
 }
 
 fn init_tracing() {
