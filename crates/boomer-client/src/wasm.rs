@@ -61,6 +61,17 @@ impl BoomerClient {
     pub fn pool_frame(&self, t_ms: f64) -> Float64Array {
         Float64Array::from(self.app.pool_frame(t_ms).as_slice())
     }
+
+    /// Drains pending discrete audio cues as a JSON array string (`"[]"` when empty).
+    ///
+    /// # Errors
+    /// Returns a JS error string if serialization unexpectedly fails.
+    #[wasm_bindgen(js_name = drainSoundCuesJson)]
+    pub fn drain_sound_cues_json(&mut self) -> Result<String, JsValue> {
+        let cues = self.app.drain_sound_cues();
+        serde_json::to_string(&cues)
+            .map_err(|err| JsValue::from_str(&format!("failed to serialize SoundCue list: {err}")))
+    }
 }
 
 impl Default for BoomerClient {

@@ -4,6 +4,12 @@ export interface Strings {
   readonly subtitle: string;
   readonly offlineBadge: string;
   readonly highContrast: string;
+  readonly soundOn: string;
+  readonly soundOff: string;
+  readonly skipToContent: string;
+  readonly landscapeHint: string;
+  readonly poolKeysHint: string;
+  readonly checkersKeysHint: string;
   readonly returnHome: string;
   readonly checkersTitle: string;
   readonly checkersDesc: string;
@@ -84,6 +90,12 @@ const EN: Strings = {
   subtitle: "Classic Offline Lounge",
   offlineBadge: "Offline WASM",
   highContrast: "High Contrast",
+  soundOn: "Sound: On",
+  soundOff: "Sound: Off",
+  skipToContent: "Skip to main content",
+  landscapeHint: "Tip: Rotate your phone to landscape for a wider pool table.",
+  poolKeysHint: "Keys: ←/→ aim (Shift = fine), ↑/↓ power, Space = shoot, Esc = cancel.",
+  checkersKeysHint: "Keys: Arrows move cursor, Enter/Space select, Esc clear.",
   returnHome: "← Back to Games",
   checkersTitle: "Checkers (English Draughts)",
   checkersDesc: "8×8 classic board, mandatory captures, multi-jumps, and 3 computer skill levels.",
@@ -163,6 +175,12 @@ const DE: Strings = {
   subtitle: "Klassische Offline-Lounge",
   offlineBadge: "Offline WASM",
   highContrast: "Hoher Kontrast",
+  soundOn: "Ton: An",
+  soundOff: "Ton: Aus",
+  skipToContent: "Zum Hauptinhalt springen",
+  landscapeHint: "Tipp: Querformat bietet auf Smartphones einen breiteren Billardtisch.",
+  poolKeysHint: "Tasten: ←/→ zielen (Shift = fein), ↑/↓ Stärke, Leertaste = Stoß, Esc = Abbruch.",
+  checkersKeysHint: "Tasten: Pfeile bewegen Cursor, Enter/Leertaste wählen, Esc abbrechen.",
   returnHome: "← Zurück zur Auswahl",
   checkersTitle: "Dame (English Draughts)",
   checkersDesc: "Klassisches 8×8-Brett, Schlagzwang, Mehrfachsprünge und 3 Computer-Stufen.",

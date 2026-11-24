@@ -11,7 +11,7 @@ use boomer_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::animation::{POOL_FRAME_LEN, PoolAnimationBuffer};
+use crate::animation::{POOL_FRAME_LEN, PoolAnimationBuffer, SoundCue};
 use crate::mapping::{aim_aid_from_dto, pool_balls_from_dto, pool_shot_from_dto};
 use crate::ports::{GameTransport, TransportError};
 
@@ -242,6 +242,8 @@ pub struct ClientApp<T: GameTransport> {
     pool_spin_y: f64,
     pool_called_pocket: Option<u8>,
     pool_cue_preview: Option<PoolCuePreviewView>,
+    sound_cues: Vec<SoundCue>,
+    last_warn_second: Option<u32>,
     dirty: bool,
 }
 
@@ -284,6 +286,8 @@ impl<T: GameTransport> ClientApp<T> {
             pool_spin_y: 0.0,
             pool_called_pocket: Some(0),
             pool_cue_preview: None,
+            sound_cues: Vec::new(),
+            last_warn_second: None,
             dirty: true,
         };
         app.drain_transport();
@@ -368,17 +372,26 @@ impl<T: GameTransport> ClientApp<T> {
     /// Advances transport timers, time-sliced AI, and Pool shot animation by `dt_ms`.
     /// Returns `true` if `ViewModel` changed.
     pub fn tick(&mut self, dt_ms: u32) -> bool {
-        if self.pool_anim.advance(dt_ms) {
+        if self.pool_anim.advance(dt_ms, &mut self.sound_cues) {
             if let Some(next_state) = self.pending_pool_state.take() {
+                if next_state.outcome.is_some() {
+                    self.sound_cues.push(SoundCue::GameOver);
+                }
                 let snap = pool_balls_from_dto(&next_state.balls);
                 self.pool_anim.load_static(&snap);
                 self.pool_state = Some(next_state);
+                self.last_warn_second = None;
             }
             self.sync_game_views();
         }
         self.transport.tick(dt_ms);
         self.drain_transport();
         self.take_dirty()
+    }
+
+    /// Drains all discrete [`SoundCue`]s emitted since the last call.
+    pub fn drain_sound_cues(&mut self) -> Vec<SoundCue> {
+        core::mem::take(&mut self.sound_cues)
     }
 
     /// Returns a reference to the current [`ViewModel`].
@@ -743,20 +756,17 @@ impl<T: GameTransport> ClientApp<T> {
                     self.dirty = true;
                 }
                 ServerMessage::CheckersSnapshot { state } => {
-                    let turn_changed = self
-                        .checkers_state
-                        .as_ref()
-                        .is_none_or(|prev| prev.turn_number != state.turn_number);
-                    if turn_changed {
-                        self.selected_path.clear();
-                    }
-                    self.checkers_state = Some(state);
-                    self.sync_game_views();
+                    self.handle_checkers_snapshot(state);
                 }
                 ServerMessage::PoolSnapshot { state } => {
                     if self.pool_anim.is_playing() {
                         self.pending_pool_state = Some(state);
                     } else {
+                        self.check_pool_clock_warning(&state);
+                        let prev_outcome = self.pool_state.as_ref().and_then(|p| p.outcome);
+                        if prev_outcome.is_none() && state.outcome.is_some() {
+                            self.sound_cues.push(SoundCue::GameOver);
+                        }
                         let balls = pool_balls_from_dto(&state.balls);
                         self.pool_anim.load_static(&balls);
                         self.pool_state = Some(state);
@@ -769,12 +779,11 @@ impl<T: GameTransport> ClientApp<T> {
                     shot,
                     state,
                 } => {
-                    // Run the shared deterministic Rust physics locally for 60 fps keyframes,
-                    // then snap cleanly to `state.balls` when the animation completes (§9.2).
                     let pre = pool_balls_from_dto(&pre_balls);
                     let snap = pool_balls_from_dto(&state.balls);
                     let sim = simulate_shot(&pre, pool_shot_from_dto(shot), true);
-                    self.pool_anim.start_replay(&sim, &snap);
+                    self.pool_anim.start_replay(&sim, &snap, shot.power);
+                    self.last_warn_second = None;
                     if self.pool_anim.is_playing() {
                         self.pending_pool_state = Some(state);
                     } else {
@@ -790,6 +799,58 @@ impl<T: GameTransport> ClientApp<T> {
                     self.dirty = true;
                 }
             }
+        }
+    }
+
+    fn handle_checkers_snapshot(&mut self, state: CheckersStateDto) {
+        let prev_moves = self.checkers_state.as_ref().map_or(0, |p| p.moves.len());
+        let prev_outcome = self.checkers_state.as_ref().and_then(|p| p.outcome);
+        let turn_changed = self
+            .checkers_state
+            .as_ref()
+            .is_none_or(|prev| prev.turn_number != state.turn_number);
+        if turn_changed {
+            self.selected_path.clear();
+            self.last_warn_second = None;
+        }
+        if state.moves.len() > prev_moves
+            && let Some(last_notation) = state.moves.last()
+        {
+            let prev_kings = self.checkers_state.as_ref().map_or(0, |p| {
+                p.board.bytes().filter(|&b| b == b'B' || b == b'W').count()
+            });
+            let next_kings = state
+                .board
+                .bytes()
+                .filter(|&b| b == b'B' || b == b'W')
+                .count();
+            if next_kings > prev_kings {
+                self.sound_cues.push(SoundCue::CheckerKing);
+            } else if last_notation.contains('x') {
+                self.sound_cues.push(SoundCue::CheckerCapture);
+            } else {
+                self.sound_cues.push(SoundCue::CheckerMove);
+            }
+        }
+        if prev_outcome.is_none() && state.outcome.is_some() {
+            self.sound_cues.push(SoundCue::GameOver);
+        }
+        self.checkers_state = Some(state);
+        self.sync_game_views();
+    }
+
+    fn check_pool_clock_warning(&mut self, state: &PoolStateDto) {
+        if state.free_practice
+            || state.outcome.is_some()
+            || state.bot_thinking
+            || state.settings.shot_timer_secs == 0
+        {
+            return;
+        }
+        let secs_left = state.turn_ms_left.div_ceil(1_000);
+        if (1..=5).contains(&secs_left) && self.last_warn_second != Some(secs_left) {
+            self.last_warn_second = Some(secs_left);
+            self.sound_cues.push(SoundCue::ClockWarn);
         }
     }
 

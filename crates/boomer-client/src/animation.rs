@@ -2,7 +2,47 @@
 
 use boomer_domain::math::canonical_zero;
 use boomer_domain::pool::constants::BALL_COUNT;
-use boomer_domain::pool::{BallState, ShotKeyframe, ShotSimulation};
+use boomer_domain::pool::{BallState, PhysicsEvent, ShotKeyframe, ShotSimulation};
+use serde::Serialize;
+
+/// Discrete era-appropriate sound cue emitted by `boomer-client` for the Web Audio synth.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SoundCue {
+    /// Pool cue striking the cue ball.
+    CueHit {
+        /// Normalized loudness in `[0.2, 1.0]`.
+        intensity: f64,
+    },
+    /// Two pool balls colliding.
+    BallClick {
+        /// Normalized loudness in `[0.15, 1.0]`.
+        intensity: f64,
+    },
+    /// Pool ball rebounding off a cushion rail or jaw.
+    CushionThud {
+        /// Normalized loudness in `[0.15, 1.0]`.
+        intensity: f64,
+    },
+    /// Pool ball dropping into a pocket.
+    PocketDrop,
+    /// Quiet Checkers piece move.
+    CheckerMove,
+    /// Checkers capture jump.
+    CheckerCapture,
+    /// Checkers piece crowned king.
+    CheckerKing,
+    /// Shot-clock / turn-clock final 5-second warning tick.
+    ClockWarn,
+    /// Match finished chime.
+    GameOver,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScheduledCue {
+    time_ms: f64,
+    cue: SoundCue,
+}
 
 /// Total number of pool balls (cue ball `0` plus object balls `1..=15`).
 pub const POOL_BALL_COUNT: usize = BALL_COUNT;
@@ -21,6 +61,8 @@ pub struct PoolAnimationBuffer {
     frame: [f64; POOL_FRAME_LEN],
     keyframes: Vec<ShotKeyframe>,
     final_balls: [(f64, f64, bool); POOL_BALL_COUNT],
+    scheduled_cues: Vec<ScheduledCue>,
+    next_cue_index: usize,
     duration_ms: f64,
     elapsed_ms: f64,
     playing: bool,
@@ -40,6 +82,8 @@ impl PoolAnimationBuffer {
             frame: [0.0; POOL_FRAME_LEN],
             keyframes: Vec::new(),
             final_balls: [(0.0, 0.0, false); POOL_BALL_COUNT],
+            scheduled_cues: Vec::new(),
+            next_cue_index: 0,
             duration_ms: 0.0,
             elapsed_ms: 0.0,
             playing: false,
@@ -72,6 +116,8 @@ impl PoolAnimationBuffer {
     /// Loads static resting ball coordinates (canceling any active playback).
     pub fn load_static(&mut self, balls: &[BallState; POOL_BALL_COUNT]) {
         self.keyframes.clear();
+        self.scheduled_cues.clear();
+        self.next_cue_index = 0;
         self.duration_ms = 0.0;
         self.elapsed_ms = 0.0;
         self.playing = false;
@@ -89,8 +135,51 @@ impl PoolAnimationBuffer {
         &mut self,
         sim: &ShotSimulation,
         snap_balls: &[BallState; POOL_BALL_COUNT],
+        shot_power: f64,
     ) {
         self.keyframes.clone_from(&sim.keyframes);
+        self.scheduled_cues.clear();
+        self.next_cue_index = 0;
+        self.scheduled_cues.push(ScheduledCue {
+            time_ms: 0.0,
+            cue: SoundCue::CueHit {
+                intensity: shot_power.clamp(0.2, 1.0),
+            },
+        });
+        for ev in &sim.events {
+            match *ev {
+                PhysicsEvent::BallHit { speed, time_ms, .. } => {
+                    if speed > 0.08 {
+                        self.scheduled_cues.push(ScheduledCue {
+                            time_ms: f64::from(time_ms),
+                            cue: SoundCue::BallClick {
+                                intensity: (speed / 4.5).clamp(0.15, 1.0),
+                            },
+                        });
+                    }
+                }
+                PhysicsEvent::CushionHit { speed, time_ms, .. } => {
+                    if speed > 0.08 {
+                        self.scheduled_cues.push(ScheduledCue {
+                            time_ms: f64::from(time_ms),
+                            cue: SoundCue::CushionThud {
+                                intensity: (speed / 4.0).clamp(0.15, 1.0),
+                            },
+                        });
+                    }
+                }
+                PhysicsEvent::Pot { time_ms, .. } | PhysicsEvent::Scratch { time_ms, .. } => {
+                    self.scheduled_cues.push(ScheduledCue {
+                        time_ms: f64::from(time_ms),
+                        cue: SoundCue::PocketDrop,
+                    });
+                }
+                PhysicsEvent::FirstContact { .. } => {}
+            }
+        }
+        self.scheduled_cues
+            .sort_by(|a, b| a.time_ms.total_cmp(&b.time_ms));
+
         for (i, b) in snap_balls.iter().enumerate() {
             if let Some(slot) = self.final_balls.get_mut(i) {
                 *slot = (b.pos.x, b.pos.y, !b.pocketed);
@@ -112,13 +201,26 @@ impl PoolAnimationBuffer {
         self.playing
     }
 
-    /// Advances shot playback by `dt_ms`. Returns `true` on the frame playback finishes.
-    pub fn advance(&mut self, dt_ms: u32) -> bool {
+    /// Advances shot playback by `dt_ms`, pushing any due [`SoundCue`]s into `out_cues`.
+    /// Returns `true` on the frame playback finishes.
+    pub fn advance(&mut self, dt_ms: u32, out_cues: &mut Vec<SoundCue>) -> bool {
         if !self.playing {
             return false;
         }
         self.elapsed_ms += f64::from(dt_ms);
+        while let Some(&entry) = self.scheduled_cues.get(self.next_cue_index) {
+            if entry.time_ms <= self.elapsed_ms {
+                out_cues.push(entry.cue);
+                self.next_cue_index += 1;
+            } else {
+                break;
+            }
+        }
         if self.elapsed_ms >= self.duration_ms {
+            while let Some(&entry) = self.scheduled_cues.get(self.next_cue_index) {
+                out_cues.push(entry.cue);
+                self.next_cue_index += 1;
+            }
             self.playing = false;
             self.elapsed_ms = self.duration_ms;
             self.snap_to_final();

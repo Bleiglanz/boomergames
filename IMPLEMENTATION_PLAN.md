@@ -276,10 +276,10 @@ disallowed-methods = [
 
 **Goal:** Complete standalone offline quality, i18n, accessibility, and bundle-size budgets.
 
-- [ ] **3.1 Era-Appropriate Audio (`web/src/audio/`):** Lightweight Web Audio API effects (cue hit, ball click, cushion thud, pocket drop, checker slide/capture/king chime, 5s shot-clock warning) + mute toggle saved in `localStorage`.
-- [ ] **3.2 Internationalization (`web/src/i18n/`):** Complete English (`en`) and German (`de`) string tables with runtime switcher.
-- [ ] **3.3 Accessibility & Responsive Pass:** WCAG 2.2 AA contrast, ≥16px scalable base font, High-Contrast mode toggle, full keyboard menu & Checkers board navigation, responsive layout down to `360px` width, zero cookies (`localStorage` only).
-- [ ] **3.4 Bundle Budget Audit:** Optimize WASM (`wasm-opt -Oz`, `lto = true`, `opt-level = "z"`) and Vite chunks; confirm initial gzipped payload (HTML/CSS/JS + Three.js + WASM) is `≤ 800 KB`.
+- [x] **3.1 Era-Appropriate Audio (`web/src/audio/`):** Lightweight Web Audio API effects (cue hit, ball click, cushion thud, pocket drop, checker slide/capture/king chime, 5s shot-clock warning) + mute toggle saved in `localStorage`.
+- [x] **3.2 Internationalization (`web/src/i18n/`):** Complete English (`en`) and German (`de`) string tables with runtime switcher.
+- [x] **3.3 Accessibility & Responsive Pass:** WCAG 2.2 AA contrast, ≥16px scalable base font, High-Contrast mode toggle, full keyboard menu & Checkers board navigation, responsive layout down to `360px` width, zero cookies (`localStorage` only).
+- [x] **3.4 Bundle Budget Audit:** Optimize WASM (`wasm-opt -Oz`, `lto = true`, `opt-level = "z"`) and Vite chunks; confirm initial gzipped payload (HTML/CSS/JS + Three.js + WASM) is `≤ 800 KB`.
 
 **Exit Criteria:**
 - Static `web/dist/` build serves cleanly with zero backend, passes all lint/test/determinism/bundle gates, and meets WCAG 2.2 AA + EN/DE requirements.

@@ -1,6 +1,8 @@
 import "./styles/classic.css";
 
+import { SoundSynth } from "./audio/synth.js";
 import { getStrings, type Strings } from "./i18n/strings.js";
+import { loadPrefs, savePrefs, type UserPrefs } from "./prefs.js";
 import { StageRenderer } from "./render/renderer.js";
 import {
   WasmBridge,
@@ -213,12 +215,56 @@ async function bootstrap(): Promise<void> {
   }
 
   const bridge = await WasmBridge.create();
+  let prefs: UserPrefs = loadPrefs();
+  const synth = new SoundSynth(prefs.muted);
+
+  // Hydrate persisted zero-cookie localStorage preferences into WASM before first render.
+  if (prefs.lang !== "en") {
+    bridge.dispatch({ kind: "set_language", lang: prefs.lang });
+  }
+  if (prefs.highContrast) {
+    bridge.dispatch({ kind: "toggle_high_contrast" });
+  }
+  if (prefs.checkersShowNumbers) {
+    bridge.dispatch({ kind: "checkers_toggle_square_numbers" });
+  }
+  // Discard any bootstrap cues before first interaction.
+  bridge.drainSoundCues();
+
   let mountedShell: MountedShell | null = null;
   let lastScreenKey = "";
+  let liveRegion: HTMLElement | null = null;
+  let contrastBtnRef: HTMLButtonElement | null = null;
+  let lastAnnouncement = "";
+
+  const persistFromVm = (vm: ViewModel): void => {
+    const showNums =
+      vm.screen.kind === "game_shell" && vm.screen.checkers !== null
+        ? vm.screen.checkers.showSquareNumbers
+        : prefs.checkersShowNumbers;
+    prefs = {
+      lang: vm.lang === "de" ? "de" : "en",
+      highContrast: vm.highContrast,
+      muted: synth.isMuted(),
+      checkersShowNumbers: showNums,
+    };
+    savePrefs(prefs);
+  };
+
+  const announce = (text: string): void => {
+    if (liveRegion !== null && text !== "" && text !== lastAnnouncement) {
+      lastAnnouncement = text;
+      liveRegion.textContent = text;
+    }
+  };
 
   const dispatchAndRender = (input: UiInput): void => {
-    if (bridge.dispatch(input)) {
+    synth.unlock();
+    const changed = bridge.dispatch(input);
+    synth.playAll(bridge.drainSoundCues());
+    if (changed) {
       renderApp();
+      persistFromVm(bridge.viewModel());
     }
   };
 
@@ -243,13 +289,31 @@ async function bootstrap(): Promise<void> {
       mountedShell !== null &&
       screenKey === lastScreenKey
     ) {
-      updateGameShellInPlace(mountedShell, vm, s, dispatchAndRender);
+      if (contrastBtnRef !== null) {
+        contrastBtnRef.className = vm.highContrast
+          ? "classic-btn active-toggle"
+          : "classic-btn";
+        contrastBtnRef.setAttribute("aria-pressed", String(vm.highContrast));
+      }
+      updateGameShellInPlace(mountedShell, vm, s, dispatchAndRender, announce);
       return;
     }
 
     lastScreenKey = screenKey;
     disposeShell();
     root.innerHTML = "";
+
+    const skipLink = document.createElement("a");
+    skipLink.className = "skip-link";
+    skipLink.href = "#main-content";
+    skipLink.textContent = s.skipToContent;
+    root.append(skipLink);
+
+    liveRegion = document.createElement("div");
+    liveRegion.className = "sr-only";
+    liveRegion.setAttribute("aria-live", "polite");
+    liveRegion.setAttribute("aria-atomic", "true");
+    root.append(liveRegion);
 
     // Header
     const header = document.createElement("header");
@@ -272,10 +336,34 @@ async function bootstrap(): Promise<void> {
         makeButton(s.returnHome, () => dispatchAndRender({ kind: "return_home" })),
       );
     }
+
+    const soundBtn = makeButton(
+      synth.isMuted() ? s.soundOff : s.soundOn,
+      () => {
+        synth.setMuted(!synth.isMuted());
+        if (!synth.isMuted()) {
+          synth.unlock();
+        }
+        soundBtn.textContent = synth.isMuted() ? s.soundOff : s.soundOn;
+        soundBtn.className = synth.isMuted() ? "classic-btn" : "classic-btn active-toggle";
+        soundBtn.setAttribute("aria-pressed", String(!synth.isMuted()));
+        persistFromVm(bridge.viewModel());
+      },
+      { active: !synth.isMuted() },
+    );
+    soundBtn.setAttribute("aria-pressed", String(!synth.isMuted()));
+
+    const contrastBtn = makeButton(
+      s.highContrast,
+      () => dispatchAndRender({ kind: "toggle_high_contrast" }),
+      { active: vm.highContrast },
+    );
+    contrastBtn.setAttribute("aria-pressed", String(vm.highContrast));
+    contrastBtnRef = contrastBtn;
+
     controls.append(
-      makeButton(s.highContrast, () => dispatchAndRender({ kind: "toggle_high_contrast" }), {
-        active: vm.highContrast,
-      }),
+      soundBtn,
+      contrastBtn,
       makeButton(vm.lang === "en" ? "Deutsch" : "English", () =>
         dispatchAndRender({ kind: "set_language", lang: vm.lang === "en" ? "de" : "en" }),
       ),
@@ -285,6 +373,7 @@ async function bootstrap(): Promise<void> {
 
     // Main area
     const main = document.createElement("main");
+    main.id = "main-content";
     main.className = "main-area";
 
     if (vm.screen.kind === "home") {
@@ -319,6 +408,11 @@ async function bootstrap(): Promise<void> {
 
       let poolWidgets: PoolWidgets | null = null;
       if (vm.screen.game === "pool") {
+        const landscapeNote = document.createElement("div");
+        landscapeNote.className = "landscape-hint";
+        landscapeNote.textContent = s.landscapeHint;
+        boardCol.append(landscapeNote);
+
         const stageRow = document.createElement("div");
         stageRow.className = "pool-stage-row";
 
@@ -368,7 +462,7 @@ async function bootstrap(): Promise<void> {
         sidePanelHost,
         poolWidgets,
       };
-      updateGameShellInPlace(mountedShell, vm, s, dispatchAndRender);
+      updateGameShellInPlace(mountedShell, vm, s, dispatchAndRender, announce);
     }
 
     // Footer
@@ -386,20 +480,49 @@ async function bootstrap(): Promise<void> {
     }
   });
 
-  // Space bar shoots in Pool (including right after dragging the Fine Aim range slider)
+  // Pool keyboard controls: Left/Right aim (Shift = fine), Up/Down power, Space shoot
   window.addEventListener("keydown", (ev) => {
-    if (ev.repeat || mountedShell?.game !== "pool" || (ev.code !== "Space" && ev.key !== " ")) {
+    if (mountedShell?.game !== "pool") {
       return;
     }
     const target = ev.target;
-    const isNativeSpaceControl =
+    const isNativeControl =
       target instanceof HTMLButtonElement ||
       target instanceof HTMLSelectElement ||
       target instanceof HTMLTextAreaElement ||
       (target instanceof HTMLInputElement && target.type !== "range");
-    if (!isNativeSpaceControl) {
+
+    if (ev.code === "Space" || ev.key === " ") {
+      if (!ev.repeat && !isNativeControl) {
+        ev.preventDefault();
+        dispatchAndRender({ kind: "pool_shoot" });
+      }
+      return;
+    }
+
+    if (isNativeControl || target instanceof HTMLInputElement) {
+      return;
+    }
+
+    const vm = bridge.viewModel();
+    if (vm.screen.kind !== "game_shell" || vm.screen.pool === null) {
+      return;
+    }
+    const pool = vm.screen.pool;
+    if (pool.animating || pool.state.outcome !== null || pool.state.botThinking) {
+      return;
+    }
+
+    if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
       ev.preventDefault();
-      dispatchAndRender({ kind: "pool_shoot" });
+      const stepDeg = ev.shiftKey ? 0.25 : 1.5;
+      const delta = ((ev.key === "ArrowLeft" ? 1 : -1) * stepDeg * Math.PI) / 180;
+      dispatchAndRender({ kind: "pool_set_aim", angle: pool.aimAngle + delta });
+    } else if (ev.key === "ArrowUp" || ev.key === "ArrowDown") {
+      ev.preventDefault();
+      const step = ev.shiftKey ? 0.02 : 0.05;
+      const nextPower = pool.power + (ev.key === "ArrowUp" ? step : -step);
+      dispatchAndRender({ kind: "pool_set_power", power: nextPower });
     }
   });
 
@@ -411,6 +534,7 @@ async function bootstrap(): Promise<void> {
     if (bridge.tick(dt)) {
       renderApp();
     }
+    synth.playAll(bridge.drainSoundCues());
 
     if (mountedShell !== null) {
       mountedShell.stage.render(
@@ -679,6 +803,10 @@ function buildPoolSideControls(
   actions.className = "control-row";
   actions.append(controls.rerackBtn, controls.resignBtn, controls.rematchBtn);
 
+  const keysHint = document.createElement("p");
+  keysHint.className = "keys-hint";
+  keysHint.textContent = s.poolKeysHint;
+
   host.append(
     heading,
     modeBox,
@@ -688,6 +816,7 @@ function buildPoolSideControls(
     controls.timerGroup,
     controls.callRow,
     actions,
+    keysHint,
   );
   return controls;
 }
@@ -697,6 +826,7 @@ function updateGameShellInPlace(
   vm: ViewModel,
   s: Strings,
   dispatch: (input: UiInput) => void,
+  announce: (text: string) => void,
 ): void {
   if (vm.screen.kind !== "game_shell") {
     return;
@@ -717,14 +847,14 @@ function updateGameShellInPlace(
   if (vm.screen.game === "checkers" && vm.screen.checkers !== null) {
     const view = vm.screen.checkers;
     shell.stage.syncCheckers(view);
-    renderCheckersHud(shell, view, vm.screen.mode, s, dispatch);
+    renderCheckersHud(shell, view, vm.screen.mode, s, dispatch, announce);
     return;
   }
 
   if (vm.screen.game === "pool" && vm.screen.pool !== null) {
     const view = vm.screen.pool;
     shell.stage.syncPool(view);
-    renderPoolHud(shell, view, vm.screen.mode, s, dispatch);
+    renderPoolHud(shell, view, vm.screen.mode, s, dispatch, announce);
   }
 }
 
@@ -734,6 +864,7 @@ function renderPoolHud(
   mode: LocalModeDto,
   s: Strings,
   dispatch: (input: UiInput) => void,
+  announce: (text: string) => void,
 ): void {
   const st = view.state;
 
@@ -751,11 +882,13 @@ function renderPoolHud(
 
   // Status / Outcome / Foul / Ball-in-hand banners
   if (st.outcome !== null) {
+    const outcomeText = formatPoolOutcome(st.outcome, mode, s);
+    announce(outcomeText);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
     const msg = document.createElement("span");
-    msg.textContent = formatPoolOutcome(st.outcome, mode, s);
+    msg.textContent = outcomeText;
     banner.append(
       msg,
       makeButton(s.rematch, () => dispatch({ kind: "rematch" }), { primary: true }),
@@ -768,6 +901,7 @@ function renderPoolHud(
     shell.bannerHost.append(banner);
   } else if (!view.animating) {
     if (st.reracked) {
+      announce(s.poolRerackedNotice);
       const b = document.createElement("div");
       b.className = "notice-banner";
       b.textContent = s.poolRerackedNotice;
@@ -775,9 +909,11 @@ function renderPoolHud(
     } else if (st.lastFouls.length > 0) {
       const firstFoul = st.lastFouls[0];
       if (firstFoul !== undefined) {
+        const foulText = formatPoolFoul(firstFoul, s);
+        announce(foulText);
         const b = document.createElement("div");
         b.className = "error-banner";
-        b.textContent = formatPoolFoul(firstFoul, s);
+        b.textContent = foulText;
         shell.bannerHost.append(b);
       }
     }
@@ -897,21 +1033,25 @@ function renderCheckersHud(
   mode: LocalModeDto,
   s: Strings,
   dispatch: (input: UiInput) => void,
+  announce: (text: string) => void,
 ): void {
   const st = view.state;
 
   if (st.outcome !== null) {
+    const outcomeText = formatCheckersOutcome(st.outcome, mode, s);
+    announce(outcomeText);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
     const msg = document.createElement("span");
-    msg.textContent = formatCheckersOutcome(st.outcome, mode, s);
+    msg.textContent = outcomeText;
     banner.append(
       msg,
       makeButton(s.rematch, () => dispatch({ kind: "rematch" }), { primary: true }),
     );
     shell.bannerHost.append(banner);
   } else if (st.drawOfferedBy !== null) {
+    announce(s.drawOfferedPrompt);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
@@ -928,6 +1068,7 @@ function renderCheckersHud(
     banner.append(msg, actions);
     shell.bannerHost.append(banner);
   } else if (st.mandatoryCapture) {
+    announce(s.mustCapture);
     const banner = document.createElement("div");
     banner.className = "notice-banner";
     banner.setAttribute("role", "status");
@@ -1072,6 +1213,10 @@ function renderCheckersHud(
     moveList.scrollTop = moveList.scrollHeight;
   }
 
+  const keysHint = document.createElement("p");
+  keysHint.className = "keys-hint";
+  keysHint.textContent = s.checkersKeysHint;
+
   shell.sidePanelHost.append(
     heading,
     modeBox,
@@ -1080,6 +1225,7 @@ function renderCheckersHud(
     actionRow,
     movesHeading,
     moveList,
+    keysHint,
   );
 }
 

@@ -190,6 +190,17 @@ export type UiInput =
   | { readonly kind: "answer_draw"; readonly accept: boolean }
   | { readonly kind: "rematch" };
 
+export type SoundCue =
+  | { readonly kind: "cue_hit"; readonly intensity: number }
+  | { readonly kind: "ball_click"; readonly intensity: number }
+  | { readonly kind: "cushion_thud"; readonly intensity: number }
+  | { readonly kind: "pocket_drop" }
+  | { readonly kind: "checker_move" }
+  | { readonly kind: "checker_capture" }
+  | { readonly kind: "checker_king" }
+  | { readonly kind: "clock_warn" }
+  | { readonly kind: "game_over" };
+
 export class WasmBridge {
   private readonly client: BoomerClient;
 
@@ -216,5 +227,13 @@ export class WasmBridge {
 
   public poolFrame(tMs: number): Float64Array {
     return this.client.poolFrame(tMs);
+  }
+
+  public drainSoundCues(): readonly SoundCue[] {
+    const raw = this.client.drainSoundCuesJson();
+    if (raw === "[]") {
+      return [];
+    }
+    return JSON.parse(raw) as SoundCue[];
   }
 }
