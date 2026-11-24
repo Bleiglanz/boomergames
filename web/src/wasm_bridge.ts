@@ -66,6 +66,84 @@ export interface CheckersView {
   readonly showSquareNumbers: boolean;
 }
 
+export type BallGroupDto = "solids" | "stripes";
+export type AimAidLevelDto = "off" | "basic" | "extended";
+export type BallInHandRuleDto = "anywhere" | "behind_head_string";
+export type EightOnBreakRuleDto = "re_rack" | "win";
+export type PoolFoulDto = "scratch" | "wrong_first_ball" | "no_hit" | "no_rail_after_contact";
+export type PoolWinReasonDto =
+  | "eight_ball_pocketed"
+  | "opponent_early_eight"
+  | "opponent_foul_on_eight"
+  | "resign";
+
+export interface PoolSettingsDto {
+  readonly aimAid: AimAidLevelDto;
+  readonly callEight: boolean;
+  readonly ballInHand: BallInHandRuleDto;
+  readonly eightOnBreak: EightOnBreakRuleDto;
+  readonly shotTimerSecs: number;
+}
+
+export interface PoolOutcomeDto {
+  readonly winnerSeat: SeatDto;
+  readonly reason: PoolWinReasonDto;
+}
+
+export interface PoolBallDto {
+  readonly id: number;
+  readonly x: number;
+  readonly y: number;
+  readonly pocketed: boolean;
+}
+
+export interface PoolStateDto {
+  readonly balls: readonly PoolBallDto[];
+  readonly activeSeat: SeatDto;
+  readonly groups: readonly [BallGroupDto | null, BallGroupDto | null];
+  readonly pocketedBySeat: readonly [readonly number[], readonly number[]];
+  readonly isBreakShot: boolean;
+  readonly ballInHand: boolean;
+  readonly ballInHandBehindLine: boolean;
+  readonly isOnEightBall: boolean;
+  readonly freePractice: boolean;
+  readonly turnNumber: number;
+  readonly settings: PoolSettingsDto;
+  readonly turnMsLeft: number;
+  readonly lastFouls: readonly PoolFoulDto[];
+  readonly lastPotted: readonly number[];
+  readonly reracked: boolean;
+  readonly botThinking: boolean;
+  readonly outcome: PoolOutcomeDto | null;
+}
+
+export interface PoolAimPreviewView {
+  readonly cuePos: readonly [number, number];
+  readonly ghostBall: readonly [number, number];
+  readonly targetBall: number | null;
+  readonly objectLine: readonly [readonly [number, number], readonly [number, number]] | null;
+  readonly cueDeflectionLine:
+    | readonly [readonly [number, number], readonly [number, number]]
+    | null;
+}
+
+export interface PoolCuePreviewView {
+  readonly pos: readonly [number, number];
+  readonly valid: boolean;
+}
+
+export interface PoolView {
+  readonly state: PoolStateDto;
+  readonly animating: boolean;
+  readonly aimAngle: number;
+  readonly power: number;
+  readonly spinX: number;
+  readonly spinY: number;
+  readonly calledPocket: number | null;
+  readonly aimPreview: PoolAimPreviewView | null;
+  readonly cuePreview: PoolCuePreviewView | null;
+}
+
 export type ScreenView =
   | { readonly kind: "home" }
   | {
@@ -74,6 +152,7 @@ export type ScreenView =
       readonly mode: LocalModeDto;
       readonly status: string;
       readonly checkers: CheckersView | null;
+      readonly pool: PoolView | null;
     };
 
 export interface ViewModel {
@@ -96,6 +175,16 @@ export type UiInput =
   | { readonly kind: "checkers_flip_board" }
   | { readonly kind: "checkers_toggle_square_numbers" }
   | { readonly kind: "checkers_set_clock"; readonly settings: CheckersSettingsDto }
+  | { readonly kind: "pool_set_aim"; readonly angle: number }
+  | { readonly kind: "pool_set_power"; readonly power: number }
+  | { readonly kind: "pool_set_spin"; readonly spin_x: number; readonly spin_y: number }
+  | { readonly kind: "pool_call_pocket"; readonly pocket: number }
+  | { readonly kind: "pool_preview_cue"; readonly x: number; readonly y: number }
+  | { readonly kind: "pool_place_cue"; readonly x: number; readonly y: number }
+  | { readonly kind: "pool_cancel_cue_preview" }
+  | { readonly kind: "pool_shoot" }
+  | { readonly kind: "pool_set_settings"; readonly settings: PoolSettingsDto }
+  | { readonly kind: "pool_rerack" }
   | { readonly kind: "resign" }
   | { readonly kind: "offer_draw" }
   | { readonly kind: "answer_draw"; readonly accept: boolean }

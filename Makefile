@@ -25,8 +25,8 @@ dev: wasm-dev
 	cd web && npm run dev
 
 determinism:
-	cargo test -p boomer-domain
-	wasm-pack test --node crates/boomer-domain
+	cargo test -p boomer-domain --release --test pool_determinism
+	wasm-pack test --node crates/boomer-domain --release --test pool_determinism
 
 clean:
 	cargo clean

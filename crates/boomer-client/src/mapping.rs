@@ -3,10 +3,18 @@
 use boomer_domain::checkers::{
     CheckersColor, CheckersMove, CheckersOutcome, DrawReason, Square, WinReason,
 };
+use boomer_domain::math::Vec2;
+use boomer_domain::pool::constants::BALL_COUNT;
+use boomer_domain::pool::{
+    AimAidLevel, BallGroup, BallInHandRule, BallState, EightOnBreakRule, PoolFoul, PoolOutcome,
+    PoolSettings, PoolWinReason, ShotInput,
+};
 use boomer_domain::{BotLevel, GameKind, LocalMode, Seat};
 use boomer_protocol::{
-    BotLevelDto, CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto, CheckersOutcomeDto,
-    CheckersWinReasonDto, GameKindDto, LocalModeDto, SeatDto,
+    AimAidLevelDto, BallGroupDto, BallInHandRuleDto, BotLevelDto, CheckersColorDto,
+    CheckersDrawReasonDto, CheckersMoveDto, CheckersOutcomeDto, CheckersWinReasonDto,
+    EightOnBreakRuleDto, GameKindDto, LocalModeDto, PoolBallDto, PoolFoulDto, PoolOutcomeDto,
+    PoolSettingsDto, PoolShotDto, PoolWinReasonDto, SeatDto,
 };
 
 /// Converts a protocol [`GameKindDto`] into a domain [`GameKind`].
@@ -149,6 +157,156 @@ pub const fn checkers_outcome_to_dto(
     }
 }
 
+/// Converts a domain [`BallGroup`] into a protocol [`BallGroupDto`].
+#[must_use]
+pub const fn ball_group_to_dto(group: BallGroup) -> BallGroupDto {
+    match group {
+        BallGroup::Solids => BallGroupDto::Solids,
+        BallGroup::Stripes => BallGroupDto::Stripes,
+    }
+}
+
+/// Converts a protocol [`AimAidLevelDto`] into a domain [`AimAidLevel`].
+#[must_use]
+pub const fn aim_aid_from_dto(dto: AimAidLevelDto) -> AimAidLevel {
+    match dto {
+        AimAidLevelDto::Off => AimAidLevel::Off,
+        AimAidLevelDto::Basic => AimAidLevel::Basic,
+        AimAidLevelDto::Extended => AimAidLevel::Extended,
+    }
+}
+
+/// Converts a domain [`AimAidLevel`] into a protocol [`AimAidLevelDto`].
+#[must_use]
+pub const fn aim_aid_to_dto(level: AimAidLevel) -> AimAidLevelDto {
+    match level {
+        AimAidLevel::Off => AimAidLevelDto::Off,
+        AimAidLevel::Basic => AimAidLevelDto::Basic,
+        AimAidLevel::Extended => AimAidLevelDto::Extended,
+    }
+}
+
+/// Converts a protocol [`PoolSettingsDto`] into domain [`PoolSettings`].
+#[must_use]
+pub const fn pool_settings_from_dto(dto: PoolSettingsDto) -> PoolSettings {
+    PoolSettings {
+        aim_aid: aim_aid_from_dto(dto.aim_aid),
+        call_eight: dto.call_eight,
+        ball_in_hand: match dto.ball_in_hand {
+            BallInHandRuleDto::Anywhere => BallInHandRule::Anywhere,
+            BallInHandRuleDto::BehindHeadString => BallInHandRule::BehindHeadString,
+        },
+        eight_on_break: match dto.eight_on_break {
+            EightOnBreakRuleDto::ReRack => EightOnBreakRule::ReRack,
+            EightOnBreakRuleDto::Win => EightOnBreakRule::Win,
+        },
+        shot_timer_secs: dto.shot_timer_secs,
+    }
+}
+
+/// Converts domain [`PoolSettings`] into a protocol [`PoolSettingsDto`].
+#[must_use]
+pub const fn pool_settings_to_dto(settings: PoolSettings) -> PoolSettingsDto {
+    PoolSettingsDto {
+        aim_aid: aim_aid_to_dto(settings.aim_aid),
+        call_eight: settings.call_eight,
+        ball_in_hand: match settings.ball_in_hand {
+            BallInHandRule::Anywhere => BallInHandRuleDto::Anywhere,
+            BallInHandRule::BehindHeadString => BallInHandRuleDto::BehindHeadString,
+        },
+        eight_on_break: match settings.eight_on_break {
+            EightOnBreakRule::ReRack => EightOnBreakRuleDto::ReRack,
+            EightOnBreakRule::Win => EightOnBreakRuleDto::Win,
+        },
+        shot_timer_secs: settings.shot_timer_secs,
+    }
+}
+
+/// Converts domain [`PoolFoul`] into [`PoolFoulDto`].
+#[must_use]
+pub const fn pool_foul_to_dto(foul: PoolFoul) -> PoolFoulDto {
+    match foul {
+        PoolFoul::Scratch => PoolFoulDto::Scratch,
+        PoolFoul::WrongFirstBall => PoolFoulDto::WrongFirstBall,
+        PoolFoul::NoHit => PoolFoulDto::NoHit,
+        PoolFoul::NoRailAfterContact => PoolFoulDto::NoRailAfterContact,
+    }
+}
+
+/// Converts domain [`PoolOutcome`] into [`PoolOutcomeDto`].
+#[must_use]
+pub const fn pool_outcome_to_dto(outcome: PoolOutcome) -> PoolOutcomeDto {
+    PoolOutcomeDto {
+        winner_seat: seat_to_dto(outcome.winner),
+        reason: match outcome.reason {
+            PoolWinReason::EightBallPocketed => PoolWinReasonDto::EightBallPocketed,
+            PoolWinReason::OpponentEarlyEight => PoolWinReasonDto::OpponentEarlyEight,
+            PoolWinReason::OpponentFoulOnEight => PoolWinReasonDto::OpponentFoulOnEight,
+            PoolWinReason::Resign => PoolWinReasonDto::Resign,
+        },
+    }
+}
+
+/// Converts domain [`BallState`] slice into protocol [`PoolBallDto`] list.
+#[must_use]
+pub fn pool_balls_to_dto(balls: &[BallState; BALL_COUNT]) -> Vec<PoolBallDto> {
+    balls
+        .iter()
+        .map(|b| PoolBallDto {
+            id: b.id,
+            x: b.pos.x,
+            y: b.pos.y,
+            pocketed: b.pocketed,
+        })
+        .collect()
+}
+
+/// Converts protocol [`PoolBallDto`] slice into a domain `[BallState; 16]` array.
+#[must_use]
+pub fn pool_balls_from_dto(dtos: &[PoolBallDto]) -> [BallState; BALL_COUNT] {
+    let mut out = core::array::from_fn(|id| {
+        #[expect(clippy::cast_possible_truncation, reason = "id in 0..16")]
+        BallState::pocketed(id as u8)
+    });
+    for dto in dtos {
+        if let Some(slot) = out.get_mut(usize::from(dto.id)) {
+            *slot = if dto.pocketed {
+                BallState::pocketed(dto.id)
+            } else {
+                BallState::stationary(dto.id, Vec2::new(dto.x, dto.y))
+            };
+        }
+    }
+    out
+}
+
+/// Converts protocol [`PoolShotDto`] into domain [`ShotInput`].
+#[must_use]
+pub fn pool_shot_from_dto(dto: PoolShotDto) -> ShotInput {
+    ShotInput {
+        angle: dto.angle,
+        power: dto.power,
+        spin_x: dto.spin_x,
+        spin_y: dto.spin_y,
+        cue_pos: dto.cue_pos.map(|[x, y]| Vec2::new(x, y)),
+        called_pocket: dto.called_pocket,
+    }
+}
+
+/// Converts domain [`ShotInput`] into protocol [`PoolShotDto`].
+#[must_use]
+pub fn pool_shot_to_dto(turn: u32, shot: ShotInput) -> PoolShotDto {
+    PoolShotDto {
+        turn,
+        angle: shot.angle,
+        power: shot.power,
+        spin_x: shot.spin_x,
+        spin_y: shot.spin_y,
+        cue_pos: shot.cue_pos.map(|p| [p.x, p.y]),
+        called_pocket: shot.called_pocket,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +329,11 @@ mod tests {
         assert_eq!(local_mode_to_dto(local_mode_from_dto(mode)), mode);
         assert!(notation_path_to_squares(&[11, 15]).is_some());
         assert!(notation_path_to_squares(&[0, 15]).is_none());
+
+        let settings = PoolSettingsDto::default();
+        assert_eq!(
+            pool_settings_to_dto(pool_settings_from_dto(settings)),
+            settings
+        );
     }
 }

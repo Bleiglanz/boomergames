@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::checkers::{CheckersSettingsDto, CheckersStateDto};
+use crate::pool::{PoolBallDto, PoolSettingsDto, PoolShotDto, PoolStateDto};
 
 /// Current wire protocol version validated during `hello` handshake.
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -94,7 +95,7 @@ pub enum ErrorCode {
 }
 
 /// Messages sent from client to transport (`LocalSessionAdapter` or `boomer-server`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
 pub enum ClientMessage {
     /// Initial protocol handshake.
@@ -134,6 +135,29 @@ pub enum ClientMessage {
         /// Updated clock settings.
         settings: CheckersSettingsDto,
     },
+    /// Submit a Pool shot.
+    #[serde(rename = "pool.shoot")]
+    PoolShoot {
+        /// Shot parameters.
+        shot: PoolShotDto,
+    },
+    /// Place the cue ball during ball-in-hand.
+    #[serde(rename = "pool.place_cue")]
+    PoolPlaceCue {
+        /// Target X coordinate in metres.
+        x: f64,
+        /// Target Y coordinate in metres.
+        y: f64,
+    },
+    /// Update Pool table rules/settings.
+    #[serde(rename = "pool.settings")]
+    PoolSettings {
+        /// Updated settings.
+        settings: PoolSettingsDto,
+    },
+    /// Re-rack the Pool table (Free Practice).
+    #[serde(rename = "pool.rerack")]
+    PoolRerack {},
     /// Resign the active match.
     #[serde(rename = "resign")]
     Resign {},
@@ -146,13 +170,13 @@ pub enum ClientMessage {
         /// `true` to accept the draw, `false` to decline.
         accept: bool,
     },
-    /// Request a rematch (alternates starting colors).
+    /// Request a rematch (alternates starting colors/breaker).
     #[serde(rename = "rematch")]
     Rematch {},
 }
 
 /// Messages emitted from transport (`LocalSessionAdapter` or `boomer-server`) to client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", content = "d")]
 pub enum ServerMessage {
     /// Handshake acknowledgement.
@@ -179,6 +203,24 @@ pub enum ServerMessage {
     CheckersSnapshot {
         /// Complete Checkers state.
         state: CheckersStateDto,
+    },
+    /// Authoritative Pool state snapshot (join, reconnect, placement, clock, or rematch).
+    #[serde(rename = "pool.snapshot")]
+    PoolSnapshot {
+        /// Complete Pool state.
+        state: PoolStateDto,
+    },
+    /// Authoritative Pool shot resolution: client replays `shot` from `pre_balls` via shared WASM physics
+    /// and snaps cleanly to `state.balls` upon completion.
+    #[serde(rename = "pool.shot")]
+    PoolShot {
+        /// Exact pre-shot resting balls (`0..=15`) used to start the deterministic client replay.
+        #[serde(rename = "preBalls")]
+        pre_balls: Vec<PoolBallDto>,
+        /// Verified shot parameters.
+        shot: PoolShotDto,
+        /// Authoritative post-shot state revealed once balls come to rest.
+        state: PoolStateDto,
     },
     /// Structured protocol error response.
     #[serde(rename = "error")]
@@ -216,6 +258,25 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"t\":\"checkers.move\""));
+        let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, msg);
+    }
+
+    #[test]
+    fn pool_shot_round_trips_envelope() {
+        let msg = ClientMessage::PoolShoot {
+            shot: PoolShotDto {
+                turn: 1,
+                angle: 0.25,
+                power: 0.72,
+                spin_x: -0.2,
+                spin_y: 0.4,
+                cue_pos: Some([0.635, 0.635]),
+                called_pocket: Some(2),
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"t\":\"pool.shoot\""));
         let decoded: ClientMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, msg);
     }

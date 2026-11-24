@@ -238,13 +238,13 @@ disallowed-methods = [
 
 **Goal:** Deliver a complete, bit-deterministic 8-Ball Pool game with authentic 2000s visual feel, full English spin physics, aiming aids, ball-in-hand, 3-level time-sliced AI, and Free Practice mode.
 
-- [ ] **2.1 Deterministic 2D Swept-CCD Physics (`boomer-domain::pool::physics`):**
+- [x] **2.1 Deterministic 2D Swept-CCD Physics (`boomer-domain::pool::physics`):**
   - Regulation `2.54 × 1.27 m` playing surface (`ball_radius = 0.028575 m`, 6 pockets with rounded jaws, head string at `x = 0.635 m`, foot spot at `x = 1.905 m`).
   - Strictly `f64` + `libm` via `boomer-domain::math` (enforced at compile time by `clippy.toml` `disallowed-methods`) with `-0.0` → `+0.0` canonicalization before state export/hashing.
   - **Solver:** Fixed `1/240 s` friction substeps combined with **analytic Swept Continuous Collision Detection (CCD)** finding the earliest time-of-impact (`t_hit`) across ball-ball, ball-rail, and ball-pocket-jaw contacts (with a deterministic per-substep event cap) so hard 15-ball rack breaks have zero tunneling and crisp symmetry.
   - **Forces & Spin:** Sliding-to-rolling friction transition, top/back spin (`spin_y`: follow/draw), side English (`spin_x`: cushion throw/rebound angle), velocity-dependent cushion restitution, pocket jaw deflection, drop detection, resting threshold, and deterministic max-duration cap.
   - Emits `ShotSimulation` with discrete events (`FirstContact`, `BallHit`, `CushionHit`, `Pot`, `Scratch`), final resting coordinates, and `1/60 s` keyframes.
-- [ ] **2.2 Strict WPA/BCA 8-Ball Rules & Aiming Aid (`boomer-domain::pool::{rules, aim}`):**
+- [x] **2.2 Strict WPA/BCA 8-Ball Rules & Aiming Aid (`boomer-domain::pool::{rules, aim}`):**
   - 15-ball triangle rack (8-ball center, one solid & one stripe in rear corners, seeded shuffle).
   - **Break rules:** Table stays **open** after the break even if a ball is pocketed; configurable 8-on-break (re-rack vs. win); break scratch → opponent ball-in-hand.
   - **Open table & groups:** Open table lasts until a legal non-break pot assigns Solids (`1..=7`) / Stripes (`9..=15`). **8-ball is never neutral** on an open table (hitting 8-ball first is always a foul). Turn continues on legal own-group pot.
@@ -252,17 +252,17 @@ disallowed-methods = [
   - **Win/Loss:** Legally pocket 8-ball after clearing own group (with optional call-pocket setting). Early 8-ball pot or 8-ball potted on a foul loses immediately.
   - **Free Practice mode:** Solo rack table with unlimited consecutive turns and instant re-rack button for testing shots/spin/break physics.
   - **Pure Rust Aiming Raycaster:** `Off` (cue line only), `Basic` (first contact + ghost ball), `Extended` (ghost ball + predicted object-ball path + cue-ball tangent).
-- [ ] **2.3 Time-Sliced Pool AI (`boomer-domain::pool::ai`):**
+- [x] **2.3 Time-Sliced Pool AI (`boomer-domain::pool::ai`):**
   - Resumable candidate-shot evaluator (`PoolSearch::step(rollout_budget)`) testing legal target ball → pocket lines via `physics.rs` (with safety-shot fallback when no clean pot exists), stepped in `~6–8 ms` slices per frame in WASM so the browser UI never stutters.
   - Seeded deterministic angular/power/spin error scaled across `Easy`, `Medium`, and `Hard`.
-- [ ] **2.4 Cross-Target Determinism Gate (`tests/pool_determinism.rs`):**
+- [x] **2.4 Cross-Target Determinism Gate (`tests/pool_determinism.rs`):**
   - 1,000 seeded shots (breaks, heavy follow/draw, side English, banks, jaw rattles) hashed by exact `(id, x.to_bits(), y.to_bits())` and rule events.
   - Verified bit-identical between native (`cargo test`) and WASM (`wasm-pack test --node`).
-- [ ] **2.5 Protocol, Typed-Array Animation Sampler & Local Adapter (`boomer-protocol`, `boomer-client`):**
+- [x] **2.5 Protocol, Typed-Array Animation Sampler & Local Adapter (`boomer-protocol`, `boomer-client`):**
   - Protocol DTOs matching `incubation/plan.md` §9.6 (`PoolStateDto`, `PoolActionDto`, `PoolResultDto`, `PoolSettingsDto`).
   - `animation.rs`: Interpolated `pool_frame(t_ms)` returning a flat `Float64Array` (fixed 16-ball stride) + discrete sound cues + exact snap to `result.balls` at rest.
   - Shot clock expiry passes turn with opponent **Ball-in-Hand** (no match forfeit per `incubation/plan.md` D-9).
-- [ ] **2.6 Classic 2000s 2D Table & Controls (`web/`):**
+- [x] **2.6 Classic 2000s 2D Table & Controls (`web/`):**
   - Three.js orthographic 2D table: `#2E8B2E` cloth, `#8B1A1A`/`#6B1010` maroon rails with tan diamonds & pocket caps, 6 black pockets, faint head string, flat numbered solids/stripes (color-blind distinguishable), light-wood cue stick, aiming aid lines.
   - Controls: desktop mouse aim, touch drag + fine-aim slider, right-side vertical power meter with tick marks, left-side cue-ball English spin widget, drag-to-place ball-in-hand with red/green validity indicator, pocketed balls display, top shot clock.
 

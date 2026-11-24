@@ -487,6 +487,7 @@ impl CheckersGame {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_arch = "wasm32"))]
     use proptest::prelude::*;
 
     use super::*;
@@ -603,6 +604,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     proptest! {
         #[test]
         fn random_playouts_preserve_board_invariants(choices in proptest::collection::vec(any::<usize>(), 1..60)) {

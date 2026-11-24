@@ -16,6 +16,7 @@
 
 pub mod checkers;
 pub mod envelope;
+pub mod pool;
 
 pub use checkers::{
     CheckersClockModeDto, CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto,
@@ -24,4 +25,8 @@ pub use checkers::{
 pub use envelope::{
     BotLevelDto, ClientMessage, ErrorCode, GameKindDto, LocalModeDto, PROTOCOL_VERSION, SeatDto,
     ServerMessage, SessionKindDto,
+};
+pub use pool::{
+    AimAidLevelDto, BallGroupDto, BallInHandRuleDto, EightOnBreakRuleDto, PoolBallDto, PoolFoulDto,
+    PoolOutcomeDto, PoolSettingsDto, PoolShotDto, PoolStateDto, PoolWinReasonDto,
 };

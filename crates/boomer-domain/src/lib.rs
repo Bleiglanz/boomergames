@@ -16,6 +16,7 @@
 
 pub mod checkers;
 pub mod math;
+pub mod pool;
 pub mod rng;
 
 /// Supported classic games on the Boomergames platform.
