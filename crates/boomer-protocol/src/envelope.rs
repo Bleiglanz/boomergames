@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::auth::{HighscoreRowDto, ProfileGameStatDto, ProfileMatchDto, RoomSummaryDto, UserDto};
 use crate::checkers::{CheckersSettingsDto, CheckersStateDto};
 use crate::pool::{PoolBallDto, PoolSettingsDto, PoolShotDto, PoolStateDto};
 
@@ -173,6 +174,57 @@ pub enum ClientMessage {
     /// Request a rematch (alternates starting colors/breaker).
     #[serde(rename = "rematch")]
     Rematch {},
+    /// Request a passwordless email magic link (Step 2).
+    #[serde(rename = "auth.email")]
+    AuthEmail {
+        /// Recipient email address.
+        email: String,
+    },
+    /// Complete passwordless sign-in using a signed magic-link token (Step 2).
+    #[serde(rename = "auth.magic")]
+    AuthMagic {
+        /// Signed magic-link token from `/#login=...`.
+        token: String,
+    },
+    /// Sign in with a Google Identity Services ID token (Step 2).
+    #[serde(rename = "auth.google")]
+    AuthGoogle {
+        /// Signed JWT ID token from Google.
+        #[serde(rename = "idToken")]
+        id_token: String,
+    },
+    /// Log out of the registered account and revert to a guest session.
+    #[serde(rename = "auth.logout")]
+    AuthLogout {},
+    /// Update display name and/or built-in avatar index.
+    #[serde(rename = "account.update")]
+    AccountUpdate {
+        /// Optional new display name (unique, profanity-filtered, 30-day cooldown).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Optional built-in avatar index (`0..16`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        avatar: Option<u8>,
+    },
+    /// Permanently delete the authenticated account (GDPR NFR-8).
+    #[serde(rename = "account.delete")]
+    AccountDelete {},
+    /// Fetch a registered user's profile and last 20 matches.
+    #[serde(rename = "profile.get")]
+    ProfileGet {
+        /// Target user wire ID (`"u123"`).
+        #[serde(rename = "userId")]
+        user_id: String,
+    },
+    /// Fetch the Top 100 High Score table (or rows around the caller).
+    #[serde(rename = "highscores.get")]
+    HighscoresGet {
+        /// Game leaderboard to fetch.
+        game: GameKindDto,
+        /// When `true`, center results around the caller ("Find me").
+        #[serde(default)]
+        around: bool,
+    },
 }
 
 /// Messages emitted from transport (`LocalSessionAdapter` or `boomer-server`) to client.
@@ -187,6 +239,49 @@ pub enum ServerMessage {
         protocol_version: u32,
         /// Session transport kind.
         mode: SessionKindDto,
+        /// Authenticated or guest identity (`None` in Step 1 offline local mode).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        me: Option<UserDto>,
+        /// Reconnect token issued to newly created guest sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guest: Option<String>,
+        /// Available lounge rooms on the server.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        rooms: Vec<RoomSummaryDto>,
+    },
+    /// Confirmation that a magic-link request was accepted (never reveals account existence).
+    #[serde(rename = "auth.sent")]
+    AuthSent {},
+    /// Successful passwordless authentication response.
+    #[serde(rename = "auth.ok")]
+    AuthOk {
+        /// Stateless signed session token stored in `localStorage`.
+        session: String,
+        /// Authenticated user summary.
+        me: UserDto,
+        /// `true` if this account was just created (prompt for name/avatar).
+        #[serde(rename = "isNew")]
+        is_new: bool,
+    },
+    /// Profile response for a registered player.
+    #[serde(rename = "profile")]
+    Profile {
+        /// User summary.
+        user: UserDto,
+        /// Member-since UTC Unix timestamp in milliseconds.
+        since: i64,
+        /// Per-game rating & W/L/D stats.
+        stats: Vec<ProfileGameStatDto>,
+        /// Last 20 finished matches.
+        last: Vec<ProfileMatchDto>,
+    },
+    /// Per-game High Score table response.
+    #[serde(rename = "highscores")]
+    Highscores {
+        /// Game kind.
+        game: GameKindDto,
+        /// Ordered leaderboard rows.
+        rows: Vec<HighscoreRowDto>,
     },
     /// Current offline session summary.
     #[serde(rename = "session.state")]

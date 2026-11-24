@@ -14,10 +14,14 @@
     )
 )]
 
+pub mod auth;
 pub mod checkers;
 pub mod envelope;
 pub mod pool;
 
+pub use auth::{
+    HighscoreRowDto, ProfileGameStatDto, ProfileMatchDto, RoomSummaryDto, UserDto, UserStatusDto,
+};
 pub use checkers::{
     CheckersClockModeDto, CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto,
     CheckersOutcomeDto, CheckersSettingsDto, CheckersStateDto, CheckersWinReasonDto,

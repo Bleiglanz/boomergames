@@ -1,0 +1,32 @@
+[package]
+name = "boomer-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Authoritative Rust axum server for Boomergames (SPA, /ws, /status, actors, PostgreSQL)"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+boomer-domain.workspace = true
+boomer-protocol.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+hmac.workspace = true
+lettre.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true

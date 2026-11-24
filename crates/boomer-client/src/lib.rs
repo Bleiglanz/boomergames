@@ -21,3 +21,5 @@ pub mod mapping;
 pub mod ports;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
+#[cfg(target_arch = "wasm32")]
+pub mod ws_adapter;

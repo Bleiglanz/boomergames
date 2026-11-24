@@ -12,6 +12,7 @@ Build **Boomergames**—a completely free, browser-based classic games platform 
 4. **Two-Step Delivery:**
    - **Step 1 (Milestones 0–3):** Offline HTML/WASM single-player client (Hotseat, 3-level Computer AI, plus Free Practice mode for Pool) for Checkers and 8-Ball Pool—**no server required**.
    - **Step 2 (Milestones 4–7):** Authoritative single-binary Rust (`axum` + `tokio`) backend with acyclic actor-based lobbies/tables, PostgreSQL (`sqlx`), passwordless auth, ratings, high scores, moderation, and GCP deployment.
+5. **Browser-First, Mobile/Tablet-Ready UX:** Desktop web browsers are the primary target, while every lobby, chat, table, and game view is built cleanly for **tablets and smartphones** as well (generous ≥44 px touch targets, responsive drawers/tabs for roster & chat on narrow screens, portrait Checkers & landscape-friendly Pool with slingshot touch play, safe-area insets, and PWA-ready viewport).
 
 ---
 
@@ -292,14 +293,14 @@ disallowed-methods = [
 
 ### Milestone 4 — `boomer-server` Core, SPA Serving, `/status`, PostgreSQL & Auth
 
-- [ ] **4.1 Workspace & Server Skeleton:** Add `crates/boomer-server` to workspace; define server ports (`UserRepo`, `StatsRepo`, `MatchRepo`, `ReportRepo`, `MailSender`, `GoogleTokenVerifier`) and DTO↔Domain mapper (`mapping.rs`).
-- [ ] **4.2 HTTP Surface (`axum` + `tower-http`):**
+- [x] **4.1 Workspace & Server Skeleton:** Add `crates/boomer-server` to workspace; define server ports (`UserRepo`, `StatsRepo`, `MatchRepo`, `ReportRepo`, `MailSender`, `GoogleTokenVerifier`) and DTO↔Domain mapper (`mapping.rs`).
+- [x] **4.2 HTTP Surface (`axum` + `tower-http`):**
   - `GET /` (+ SPA fallback): Immutable 1-year cached hashed assets, `no-cache` `index.html`, `application/wasm`, gzip/brotli, strict CSP (`script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com`).
   - `GET /status`: Cached JSON health endpoint (`status`, `version`, `uptimeS`, `db`, `online`, `tables`, `games`) returning 200 healthy / 503 degraded.
   - `GET /ws`: WebSocket upgrade enforcing `hello` handshake, 4 KB max message size, rate limits (1 msg/s chat, 10 msg/s other), and 20s ping/pong liveness.
-- [ ] **4.3 PostgreSQL Schema (`migrations/0001_initial.sql` & `sqlx`):**
-  - Implement exact 4-table schema from `incubation/plan.md` §9.5 (`users`, `player_stats`, `matches`, `reports`) with compile-time checked queries.
-- [ ] **4.4 Passwordless Auth & Client WS Adapter:**
+- [x] **4.3 PostgreSQL Schema (`migrations/0001_initial.sql` & `sqlx`):**
+  - Implement exact 4-table schema from `incubation/plan.md` §9.5 (`users`, `player_stats`, `matches`, `reports`) with `sqlx` runtime queries + automatic embedded migration execution and an in-memory adapter for zero-setup dev/testing.
+- [x] **4.4 Passwordless Auth & Client WS Adapter:**
   - Guests (`Guest_XXXX`) with reconnectable guest token (in-memory only, no DB row).
   - Stateless signed session tokens (`user_id` + `session_version`) stored in `localStorage`.
   - Email magic links (`/#login=<token>`, 15-min TTL) via `lettre` over SMTP port 587.

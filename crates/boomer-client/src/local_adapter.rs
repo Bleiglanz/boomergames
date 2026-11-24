@@ -818,6 +818,9 @@ impl GameTransport for LocalSessionAdapter {
                 self.outbox.push_back(ServerMessage::Welcome {
                     protocol_version: PROTOCOL_VERSION,
                     mode: SessionKindDto::Local,
+                    me: None,
+                    guest: None,
+                    rooms: Vec::new(),
                 });
                 self.outbox.push_back(ServerMessage::SessionState {
                     game: None,
@@ -880,6 +883,17 @@ impl GameTransport for LocalSessionAdapter {
             }
             ClientMessage::Rematch {} => {
                 self.handle_rematch();
+                Ok(())
+            }
+            ClientMessage::AuthEmail { .. }
+            | ClientMessage::AuthMagic { .. }
+            | ClientMessage::AuthGoogle { .. }
+            | ClientMessage::AuthLogout {}
+            | ClientMessage::AccountUpdate { .. }
+            | ClientMessage::AccountDelete {}
+            | ClientMessage::ProfileGet { .. }
+            | ClientMessage::HighscoresGet { .. } => {
+                self.push_error(ErrorCode::NotAllowed, "offline");
                 Ok(())
             }
         }

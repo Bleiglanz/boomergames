@@ -798,6 +798,13 @@ impl<T: GameTransport> ClientApp<T> {
                     self.view.last_error = Some(code);
                     self.dirty = true;
                 }
+                ServerMessage::AuthSent {}
+                | ServerMessage::AuthOk { .. }
+                | ServerMessage::Profile { .. }
+                | ServerMessage::Highscores { .. } => {
+                    // Handled by the Step 2 online lounge UI in Milestone 5.
+                    self.dirty = true;
+                }
             }
         }
     }

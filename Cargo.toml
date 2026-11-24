@@ -4,6 +4,7 @@ members = [
     "crates/boomer-domain",
     "crates/boomer-protocol",
     "crates/boomer-client",
+    "crates/boomer-server",
 ]
 
 [workspace.package]
@@ -13,15 +14,30 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.88"
 
 [workspace.dependencies]
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
 boomer-domain = { path = "crates/boomer-domain" }
 boomer-protocol = { path = "crates/boomer-protocol" }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+hmac = "0.12"
 js-sys = "0.3"
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 libm = "0.2"
 proptest = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "chrono", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+tokio-tungstenite = "0.26"
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "compression-br", "set-header", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-test = "0.3"
+web-sys = { version = "0.3", features = ["CloseEvent", "ErrorEvent", "Event", "MessageEvent", "WebSocket"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -1,0 +1,93 @@
+//! Environment-driven server configuration with safe local development defaults.
+
+/// SMTP configuration for sending passwordless magic links (port 587 STARTTLS).
+#[derive(Debug, Clone)]
+pub struct SmtpConfig {
+    /// SMTP hostname (e.g., `smtp-relay.brevo.com`).
+    pub host: String,
+    /// SMTP port (typically `587`).
+    pub port: u16,
+    /// SMTP username.
+    pub username: String,
+    /// SMTP password.
+    pub password: String,
+    /// Sender address (e.g., `Boomergames <login@boomergames.example>`).
+    pub from: String,
+}
+
+/// Runtime configuration for `boomer-server`.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    /// Socket address to listen on (`BOOMER_BIND`, default `0.0.0.0:8080`).
+    pub bind_addr: String,
+    /// Directory containing compiled Vite SPA assets (`BOOMER_STATIC_DIR`, default `web/dist`).
+    pub static_dir: String,
+    /// Public base URL used inside magic links (`BOOMER_PUBLIC_ORIGIN`, default `http://localhost:8080`).
+    pub public_origin: String,
+    /// Optional PostgreSQL connection string (`DATABASE_URL`). If omitted, uses in-memory dev repos.
+    pub database_url: Option<String>,
+    /// HMAC secret signing stateless session, magic-link, and guest tokens (`BOOMER_SESSION_SECRET`).
+    pub session_secret: String,
+    /// Optional SMTP config (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`).
+    pub smtp: Option<SmtpConfig>,
+    /// Optional Google OAuth client ID (`GOOGLE_CLIENT_ID`).
+    pub google_client_id: Option<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: "127.0.0.1:8080".to_owned(),
+            static_dir: "web/dist".to_owned(),
+            public_origin: "http://127.0.0.1:8080".to_owned(),
+            database_url: None,
+            session_secret: "dev-only-insecure-secret-change-in-production".to_owned(),
+            smtp: None,
+            google_client_id: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Reads configuration from environment variables with local-dev fallbacks.
+    #[must_use]
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        let bind_addr = std::env::var("BOOMER_BIND").unwrap_or(defaults.bind_addr);
+        let static_dir = std::env::var("BOOMER_STATIC_DIR").unwrap_or(defaults.static_dir);
+        let public_origin = std::env::var("BOOMER_PUBLIC_ORIGIN").unwrap_or(defaults.public_origin);
+        let database_url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let session_secret =
+            std::env::var("BOOMER_SESSION_SECRET").unwrap_or(defaults.session_secret);
+        let google_client_id = std::env::var("GOOGLE_CLIENT_ID")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+
+        let smtp = std::env::var("SMTP_HOST")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|host| SmtpConfig {
+                host,
+                port: std::env::var("SMTP_PORT")
+                    .ok()
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(587),
+                username: std::env::var("SMTP_USER").unwrap_or_default(),
+                password: std::env::var("SMTP_PASS").unwrap_or_default(),
+                from: std::env::var("SMTP_FROM")
+                    .unwrap_or_else(|_| "Boomergames <noreply@boomergames.local>".to_owned()),
+            });
+
+        Self {
+            bind_addr,
+            static_dir,
+            public_origin,
+            database_url,
+            session_secret,
+            smtp,
+            google_client_id,
+        }
+    }
+}
