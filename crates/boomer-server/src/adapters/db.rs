@@ -4,11 +4,11 @@ use boomer_domain::GameKind;
 use boomer_domain::rating::{
     MatchScore, PlayerRatingInput, STARTING_RATING, calculate_match_elo, qualifies_for_highscore,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 
-use crate::auth::{MAX_AVATAR_INDEX, NAME_CHANGE_COOLDOWN_DAYS, validate_display_name};
+use crate::auth::{MAX_AVATAR_INDEX, validate_display_name};
 use crate::mapping::{game_kind_from_db, game_kind_to_db};
 use crate::ports::{
     BoxFuture, HealthCheck, HighscoreEntry, MatchHistoryItem, MatchRepo, PlayerStatRecord,
@@ -158,13 +158,6 @@ impl UserRepo for PgRepos {
                 if existing.display_name.eq_ignore_ascii_case(&valid) {
                     (existing.display_name, existing.name_changed_at)
                 } else {
-                    if let Some(last_change) = existing.name_changed_at
-                        && now < last_change + Duration::days(NAME_CHANGE_COOLDOWN_DAYS)
-                    {
-                        return Err(PortError::Conflict(
-                            "display name may only be changed once every 30 days".to_owned(),
-                        ));
-                    }
                     (valid, Some(now))
                 }
             } else {

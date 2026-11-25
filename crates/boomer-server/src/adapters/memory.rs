@@ -8,9 +8,9 @@ use boomer_domain::GameKind;
 use boomer_domain::rating::{
     MatchScore, PlayerRatingInput, STARTING_RATING, calculate_match_elo, qualifies_for_highscore,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
-use crate::auth::{MAX_AVATAR_INDEX, NAME_CHANGE_COOLDOWN_DAYS, validate_display_name};
+use crate::auth::{MAX_AVATAR_INDEX, validate_display_name};
 use crate::ports::{
     BoxFuture, GoogleTokenVerifier, HealthCheck, HighscoreEntry, MailSender, MatchHistoryItem,
     MatchRepo, PlayerStatRecord, PortError, RecordMatchInput, RecordMatchOutcome,
@@ -248,13 +248,6 @@ impl UserRepo for MemoryRepos {
                 }
                 let user = guard.users.get_mut(&user_id).ok_or(PortError::NotFound)?;
                 if !user.display_name.eq_ignore_ascii_case(&valid) {
-                    if let Some(last_change) = user.name_changed_at
-                        && now < last_change + Duration::days(NAME_CHANGE_COOLDOWN_DAYS)
-                    {
-                        return Err(PortError::Conflict(
-                            "display name may only be changed once every 30 days".to_owned(),
-                        ));
-                    }
                     user.display_name = valid;
                     user.name_changed_at = Some(now);
                 }

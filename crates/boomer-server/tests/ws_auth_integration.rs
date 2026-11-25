@@ -280,22 +280,22 @@ async fn magic_link_profile_highscores_and_gdpr_delete() {
         other => panic!("expected updated AuthOk, got {other:?}"),
     }
 
-    // Immediate second rename is blocked by 30-day cooldown.
+    // Users can update their nickname again immediately (persisted to their email).
     send_json(
         &mut ws_main,
         &ClientMessage::AccountUpdate {
-            name: Some("AnotherName".to_owned()),
+            name: Some("CueWizard".to_owned()),
             avatar: None,
         },
     )
     .await;
-    assert!(matches!(
-        recv_json(&mut ws_main).await,
-        ServerMessage::Error {
-            code: ErrorCode::Invalid,
-            ..
+    match recv_json(&mut ws_main).await {
+        ServerMessage::AuthOk { me, .. } => {
+            assert_eq!(me.name, "CueWizard");
+            assert_eq!(me.avatar, 4);
         }
-    ));
+        other => panic!("expected updated nickname AuthOk, got {other:?}"),
+    }
 
     // Seed a Pool stat row and verify Profile + Highscores over WS.
     let uid: i64 = user_wire_id.strip_prefix('u').unwrap().parse().unwrap();
@@ -320,7 +320,7 @@ async fn magic_link_profile_highscores_and_gdpr_delete() {
     .await;
     match recv_json(&mut ws_main).await {
         ServerMessage::Profile { user, stats, .. } => {
-            assert_eq!(user.name, "RailMaster");
+            assert_eq!(user.name, "CueWizard");
             assert_eq!(stats.len(), 1);
             assert_eq!(stats[0].rating, 1420);
         }
@@ -339,18 +339,18 @@ async fn magic_link_profile_highscores_and_gdpr_delete() {
         ServerMessage::Highscores { game, rows } => {
             assert_eq!(game, GameKindDto::Pool);
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].name, "RailMaster");
+            assert_eq!(rows[0].name, "CueWizard");
             assert_eq!(rows[0].wins, 9);
         }
         other => panic!("expected Highscores, got {other:?}"),
     }
 
-    // Reconnect using stateless session token -> authenticated immediately.
+    // Reconnect using stateless session token -> remembers last nickname associated with email.
     let (mut ws_resumed, welcome) = connect_hello(&srv, Some(session_token.clone()), None).await;
     match welcome {
         ServerMessage::Welcome { me: Some(me), .. } => {
             assert_eq!(me.id, user_wire_id);
-            assert_eq!(me.name, "RailMaster");
+            assert_eq!(me.name, "CueWizard");
         }
         other => panic!("expected session welcome, got {other:?}"),
     }

@@ -104,6 +104,8 @@ export interface Strings {
   readonly loungeGoogleLoading: string;
   readonly loungeMagicSent: string;
   readonly loungeSignedIn: string;
+  readonly loungeNicknameLabel: string;
+  readonly loungeNicknameHint: string;
   readonly loungeSaveAccount: string;
   readonly loungeLogout: string;
   readonly loungeDeleteAccount: string;
@@ -273,8 +275,10 @@ const EN: Strings = {
   loungeOrDivider: "or sign in with email",
   loungeGoogleLoading: "Loading Google Sign-In…",
   loungeMagicSent: "If the email is valid, your login link has been sent (valid 15 min).",
-  loungeSignedIn: "Signed in!",
-  loungeSaveAccount: "Save Changes",
+  loungeSignedIn: "Signed in! Keep your last nickname or pick a new one:",
+  loungeNicknameLabel: "Nickname (shown in lounge & games)",
+  loungeNicknameHint: "Saved to your email — you can change it on every login (3–20 letters, numbers, _ or -).",
+  loungeSaveAccount: "Save & Play",
   loungeLogout: "Sign Out",
   loungeDeleteAccount: "Delete Account",
   loungeDeleteConfirm: "Permanently delete your account and stats? This cannot be undone.",
@@ -442,8 +446,10 @@ const DE: Strings = {
   loungeOrDivider: "oder per E-Mail anmelden",
   loungeGoogleLoading: "Google-Anmeldung wird geladen…",
   loungeMagicSent: "Falls die Adresse gültig ist, wurde dein Login-Link gesendet (15 Min. gültig).",
-  loungeSignedIn: "Angemeldet!",
-  loungeSaveAccount: "Speichern",
+  loungeSignedIn: "Angemeldet! Behalte deinen Spitznamen oder wähle einen neuen:",
+  loungeNicknameLabel: "Spitzname (in Lounge & Spielen sichtbar)",
+  loungeNicknameHint: "Mit deiner E-Mail verknüpft — bei jedem Login änderbar (3–20 Buchstaben, Zahlen, _ oder -).",
+  loungeSaveAccount: "Speichern & Spielen",
   loungeLogout: "Abmelden",
   loungeDeleteAccount: "Konto löschen",
   loungeDeleteConfirm: "Konto und Statistiken dauerhaft löschen? Dies kann nicht rückgängig gemacht werden.",

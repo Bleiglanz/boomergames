@@ -277,7 +277,7 @@ export class LobbyController {
     // Active modal overlay
     if (this.modal === "create_table") {
       shell.append(this.buildCreateTableModal());
-    } else if (this.modal === "account" || st.isNewAccount) {
+    } else if (this.modal === "account" || st.needsNicknameReview) {
       shell.append(this.buildAccountModal());
     } else if (this.modal === "highscores") {
       shell.append(this.buildHighscoresModal());
@@ -1007,11 +1007,25 @@ export class LobbyController {
       form.append(emailInput, row);
       dialog.append(p, form);
     } else {
+      const form = document.createElement("form");
+      form.className = "control-group";
+
+      const nameLabel = document.createElement("label");
+      nameLabel.htmlFor = "boomer-nickname-input";
+      nameLabel.textContent = s.loungeNicknameLabel;
+
       const nameInput = document.createElement("input");
+      nameInput.id = "boomer-nickname-input";
       nameInput.type = "text";
       nameInput.className = "classic-input";
+      nameInput.minLength = 3;
       nameInput.maxLength = 20;
+      nameInput.required = true;
       nameInput.value = me.name;
+
+      const hint = document.createElement("p");
+      hint.className = "keys-hint";
+      hint.textContent = s.loungeNicknameHint;
 
       let selectedAvatar = me.avatar;
       const avatarGrid = document.createElement("div");
@@ -1031,18 +1045,15 @@ export class LobbyController {
         avatarGrid.append(b);
       });
 
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "submit";
+      saveBtn.className = "classic-btn primary";
+      saveBtn.textContent = s.loungeSaveAccount;
+
       const row = document.createElement("div");
       row.className = "control-row";
       row.append(
-        makeBtn(
-          s.loungeSaveAccount,
-          () => {
-            this.session.state.isNewAccount = false;
-            this.modal = "none";
-            this.session.updateAccount(nameInput.value, selectedAvatar);
-          },
-          { primary: true },
-        ),
+        saveBtn,
         makeBtn(s.loungeLogout, () => {
           this.modal = "none";
           this.session.logout();
@@ -1054,12 +1065,19 @@ export class LobbyController {
           }
         }),
         makeBtn(s.loungeCancel, () => {
-          this.session.state.isNewAccount = false;
           this.modal = "none";
-          this.render();
+          this.session.dismissNicknameReview();
         }),
       );
-      dialog.append(nameInput, avatarGrid, row);
+
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        this.modal = "none";
+        this.session.updateAccount(nameInput.value, selectedAvatar);
+      });
+
+      form.append(nameLabel, nameInput, hint, avatarGrid, row);
+      dialog.append(form);
     }
 
     overlay.append(dialog);

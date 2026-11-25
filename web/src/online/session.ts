@@ -143,6 +143,7 @@ export interface OnlineState {
   highscores: { game: GameKindDto; rows: HighscoreRowDto[] } | null;
   authNotice: string | null;
   isNewAccount: boolean;
+  needsNicknameReview: boolean;
   googleClientId: string | null;
   lastError: string | null;
 }
@@ -206,6 +207,7 @@ export class OnlineSession {
     highscores: null,
     authNotice: null,
     isNewAccount: false,
+    needsNicknameReview: false,
     googleClientId: null,
     lastError: null,
   };
@@ -216,6 +218,7 @@ export class OnlineSession {
   private intentionallyClosed = false;
   private pendingLoginToken: string | null = null;
   private pendingTableLink: string | null = null;
+  private pendingAccountSave = false;
   private readonly listeners = new Set<() => void>();
   private readonly gameFrameListeners = new Set<(rawJson: string) => void>();
   public latestGameFrameJson: string | null = null;
@@ -437,18 +440,28 @@ export class OnlineSession {
     if (avatar !== undefined) {
       payload.avatar = avatar;
     }
+    this.pendingAccountSave = true;
+    this.state.needsNicknameReview = false;
     this.send("account.update", payload);
+  }
+
+  dismissNicknameReview(): void {
+    this.state.needsNicknameReview = false;
+    this.state.isNewAccount = false;
+    this.notify();
   }
 
   logout(): void {
     writeStorage(SESSION_KEY, null);
     this.state.isNewAccount = false;
+    this.state.needsNicknameReview = false;
     this.send("auth.logout", {});
   }
 
   deleteAccount(): void {
     writeStorage(SESSION_KEY, null);
     this.state.isNewAccount = false;
+    this.state.needsNicknameReview = false;
     this.send("account.delete", {});
   }
 
@@ -727,7 +740,15 @@ export class OnlineSession {
         }
         this.state.me = (d.me as UserDto | undefined) ?? this.state.me;
         this.state.isNewAccount = Boolean(d.isNew);
-        this.state.authNotice = "signed_in";
+        if (this.pendingAccountSave) {
+          this.pendingAccountSave = false;
+          this.state.needsNicknameReview = false;
+          this.state.authNotice = null;
+        } else {
+          // Prompt the user to confirm or change their nickname on every login.
+          this.state.needsNicknameReview = true;
+          this.state.authNotice = "signed_in";
+        }
         break;
       }
       case "highscores": {
