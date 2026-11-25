@@ -67,7 +67,7 @@ body {
 .top-bar {
   background: var(--bg-header);
   border-bottom: 2px solid var(--border-dark);
-  padding: 0.7rem 1rem;
+  padding: 0.65rem 5%;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -151,10 +151,23 @@ body {
 
 .main-area {
   flex: 1;
-  padding: 0.9rem 1rem;
-  max-width: 1180px;
-  width: 100%;
+  padding: 0.85rem 0;
+  width: 90%;
+  max-width: 2400px;
   margin: 0 auto;
+}
+
+@media (max-width: 720px) {
+  .top-bar,
+  .footer-bar {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+
+  .main-area {
+    width: 100%;
+    padding: 0.65rem 0.6rem;
+  }
 }
 
 .error-banner {
@@ -212,7 +225,7 @@ body {
 
 .shell-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 310px;
+  grid-template-columns: minmax(0, 1fr) clamp(290px, 20vw, 360px);
   gap: 1rem;
   align-items: start;
 }
@@ -302,6 +315,7 @@ body {
   border: 3px solid var(--border-dark);
   width: 100%;
   min-height: 320px;
+  max-height: calc(100vh - 205px);
   aspect-ratio: 16 / 9;
   position: relative;
   overflow: hidden;
@@ -310,8 +324,8 @@ body {
 
 .canvas-frame.checkers-aspect {
   aspect-ratio: 1 / 1;
-  max-width: 660px;
-  max-height: 660px;
+  max-width: min(820px, calc(100vh - 205px));
+  max-height: min(820px, calc(100vh - 205px));
   margin: 0 auto;
 }
 
@@ -589,7 +603,7 @@ body {
 .footer-bar {
   background: var(--bg-header);
   border-top: 2px solid var(--border-dark);
-  padding: 0.5rem 1rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
+  padding: 0.5rem 5% calc(0.5rem + env(safe-area-inset-bottom, 0px));
   font-size: 0.85rem;
   color: var(--text-muted);
   display: flex;
