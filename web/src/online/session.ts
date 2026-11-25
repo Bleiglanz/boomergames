@@ -143,6 +143,7 @@ export interface OnlineState {
   highscores: { game: GameKindDto; rows: HighscoreRowDto[] } | null;
   authNotice: string | null;
   isNewAccount: boolean;
+  googleClientId: string | null;
   lastError: string | null;
 }
 
@@ -205,6 +206,7 @@ export class OnlineSession {
     highscores: null,
     authNotice: null,
     isNewAccount: false,
+    googleClientId: null,
     lastError: null,
   };
 
@@ -261,8 +263,12 @@ export class OnlineSession {
         this.notify();
         return false;
       }
-      const data = (await resp.json()) as { status?: unknown };
+      const data = (await resp.json()) as { status?: unknown; googleClientId?: unknown };
       if (typeof data.status === "string") {
+        this.state.googleClientId =
+          typeof data.googleClientId === "string" && data.googleClientId.trim() !== ""
+            ? data.googleClientId.trim()
+            : null;
         this.state.status = "idle";
         this.notify();
         return true;
@@ -414,6 +420,12 @@ export class OnlineSession {
   requestMagicLink(email: string): void {
     this.state.authNotice = null;
     this.send("auth.email", { email: email.trim() });
+    this.notify();
+  }
+
+  signInWithGoogle(idToken: string): void {
+    this.state.authNotice = null;
+    this.send("auth.google", { idToken });
     this.notify();
   }
 

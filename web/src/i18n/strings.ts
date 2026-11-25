@@ -100,6 +100,8 @@ export interface Strings {
   readonly loungeAccountTitle: string;
   readonly loungeSignInDesc: string;
   readonly loungeSendMagicLink: string;
+  readonly loungeOrDivider: string;
+  readonly loungeGoogleLoading: string;
   readonly loungeMagicSent: string;
   readonly loungeSignedIn: string;
   readonly loungeSaveAccount: string;
@@ -268,6 +270,8 @@ const EN: Strings = {
   loungeSignInDesc:
     "Enter your email for a passwordless magic login link (no password, no cookies).",
   loungeSendMagicLink: "Send Login Link",
+  loungeOrDivider: "or sign in with email",
+  loungeGoogleLoading: "Loading Google Sign-In…",
   loungeMagicSent: "If the email is valid, your login link has been sent (valid 15 min).",
   loungeSignedIn: "Signed in!",
   loungeSaveAccount: "Save Changes",
@@ -435,6 +439,8 @@ const DE: Strings = {
   loungeSignInDesc:
     "Gib deine E-Mail-Adresse für einen passwortlosen Login-Link ein (kein Passwort, keine Cookies).",
   loungeSendMagicLink: "Login-Link senden",
+  loungeOrDivider: "oder per E-Mail anmelden",
+  loungeGoogleLoading: "Google-Anmeldung wird geladen…",
   loungeMagicSent: "Falls die Adresse gültig ist, wurde dein Login-Link gesendet (15 Min. gültig).",
   loungeSignedIn: "Angemeldet!",
   loungeSaveAccount: "Speichern",

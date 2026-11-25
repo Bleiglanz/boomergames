@@ -33,6 +33,9 @@ pub struct StatusPayload {
     pub tables: u32,
     /// Active matches currently in progress.
     pub games: u32,
+    /// Public Google Identity Services OAuth Client ID, when configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_client_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

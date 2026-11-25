@@ -20,12 +20,13 @@ use crate::state::{AppState, CachedStatus, StatusPayload};
 /// Cache TTL for `GET /status` to avoid hammering PostgreSQL on health probes.
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(3);
 
-/// Strict Content-Security-Policy matching `incubation/plan.md` §9.4.
+/// Strict Content-Security-Policy matching `incubation/plan.md` §9.4 (+ Google Identity Services).
 const STRICT_CSP: &str = "default-src 'self'; \
     script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com; \
-    style-src 'self' 'unsafe-inline'; \
-    connect-src 'self' ws: wss:; \
-    img-src 'self' data:; \
+    style-src 'self' 'unsafe-inline' https://accounts.google.com; \
+    connect-src 'self' ws: wss: https://accounts.google.com; \
+    frame-src https://accounts.google.com; \
+    img-src 'self' data: https://lh3.googleusercontent.com; \
     frame-ancestors 'none'";
 
 /// Builds the complete `axum` [`Router`] exposing only the SPA, `/ws`, and `/status`.
@@ -93,6 +94,7 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
         online: state.online.load(Ordering::Relaxed),
         tables: state.tables.load(Ordering::Relaxed),
         games: state.games.load(Ordering::Relaxed),
+        google_client_id: state.config.google_client_id.clone(),
     };
 
     {

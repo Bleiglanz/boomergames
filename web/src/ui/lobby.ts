@@ -33,6 +33,66 @@ type LoungeTab = "tables" | "players" | "chat";
 type TableTab = "table" | "chat" | "host";
 type ActiveModal = "none" | "create_table" | "account" | "highscores";
 
+interface GoogleCredentialResponse {
+  readonly credential?: string;
+}
+
+interface GoogleAccountsIdApi {
+  initialize(config: {
+    readonly client_id: string;
+    readonly callback: (resp: GoogleCredentialResponse) => void;
+    readonly auto_select?: boolean;
+  }): void;
+  renderButton(
+    parent: HTMLElement,
+    options: {
+      readonly theme?: "outline" | "filled_blue" | "filled_black";
+      readonly size?: "large" | "medium" | "small";
+      readonly text?: "signin_with" | "signup_with" | "continue_with";
+      readonly width?: number;
+    },
+  ): void;
+}
+
+interface GoogleGlobal {
+  readonly accounts?: {
+    readonly id?: GoogleAccountsIdApi;
+  };
+}
+
+let gsiLoadPromise: Promise<GoogleAccountsIdApi | null> | null = null;
+
+function loadGoogleIdentity(): Promise<GoogleAccountsIdApi | null> {
+  const win = window as unknown as { google?: GoogleGlobal };
+  if (win.google?.accounts?.id !== undefined) {
+    return Promise.resolve(win.google.accounts.id);
+  }
+  if (gsiLoadPromise !== null) {
+    return gsiLoadPromise;
+  }
+  gsiLoadPromise = new Promise<GoogleAccountsIdApi | null>((resolve) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[src="https://accounts.google.com/gsi/client"]',
+    );
+    const finish = (): void => {
+      resolve(win.google?.accounts?.id ?? null);
+    };
+    if (existing !== null) {
+      existing.addEventListener("load", finish, { once: true });
+      existing.addEventListener("error", () => resolve(null), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.addEventListener("load", finish, { once: true });
+    script.addEventListener("error", () => resolve(null), { once: true });
+    document.head.append(script);
+  });
+  return gsiLoadPromise;
+}
+
 function avatarGlyph(index: number): string {
   return AVATAR_BADGES[index % AVATAR_BADGES.length] ?? "🎱";
 }
@@ -875,27 +935,77 @@ export class LobbyController {
     }
 
     if (me === null || me.guest) {
+      if (st.googleClientId !== null) {
+        const clientId = st.googleClientId;
+        const googleSlot = document.createElement("div");
+        googleSlot.className = "google-signin-slot";
+        googleSlot.textContent = s.loungeGoogleLoading;
+        dialog.append(googleSlot);
+
+        void loadGoogleIdentity().then((gis) => {
+          if (!googleSlot.isConnected) {
+            return;
+          }
+          if (gis === null) {
+            googleSlot.remove();
+            return;
+          }
+          googleSlot.textContent = "";
+          gis.initialize({
+            client_id: clientId,
+            callback: (resp) => {
+              if (typeof resp.credential === "string" && resp.credential !== "") {
+                this.session.signInWithGoogle(resp.credential);
+              }
+            },
+          });
+          gis.renderButton(googleSlot, {
+            theme: "outline",
+            size: "large",
+            text: "signin_with",
+            width: 280,
+          });
+        });
+
+        const divider = document.createElement("div");
+        divider.className = "auth-divider";
+        divider.textContent = s.loungeOrDivider;
+        dialog.append(divider);
+      }
+
       const p = document.createElement("p");
       p.textContent = s.loungeSignInDesc;
+
+      const form = document.createElement("form");
+      form.className = "control-group";
       const emailInput = document.createElement("input");
       emailInput.type = "email";
+      emailInput.required = true;
       emailInput.className = "classic-input";
       emailInput.placeholder = "you@example.com";
+
+      const submitBtn = document.createElement("button");
+      submitBtn.type = "submit";
+      submitBtn.className = "classic-btn primary";
+      submitBtn.textContent = s.loungeSendMagicLink;
 
       const row = document.createElement("div");
       row.className = "control-row";
       row.append(
-        makeBtn(
-          s.loungeSendMagicLink,
-          () => this.session.requestMagicLink(emailInput.value),
-          { primary: true },
-        ),
+        submitBtn,
         makeBtn(s.loungeCancel, () => {
           this.modal = "none";
           this.render();
         }),
       );
-      dialog.append(p, emailInput, row);
+      form.addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        if (emailInput.value.trim() !== "") {
+          this.session.requestMagicLink(emailInput.value);
+        }
+      });
+      form.append(emailInput, row);
+      dialog.append(p, form);
     } else {
       const nameInput = document.createElement("input");
       nameInput.type = "text";

@@ -1,4 +1,4 @@
-.PHONY: check fmt clippy test wasm build dev determinism clean
+.PHONY: check fmt clippy test wasm build dev determinism deploy clean
 
 check: fmt clippy
 
@@ -27,6 +27,9 @@ dev: wasm-dev
 determinism:
 	cargo test -p boomer-domain --release --test pool_determinism
 	wasm-pack test --node crates/boomer-domain --release --test pool_determinism
+
+deploy:
+	./deploy.sh
 
 clean:
 	cargo clean
