@@ -717,7 +717,14 @@ async function bootstrap(): Promise<void> {
     // Footer
     const footer = document.createElement("footer");
     footer.className = "footer-bar";
-    footer.textContent = s.footerNote;
+    const footerText = document.createElement("span");
+    footerText.textContent = s.footerNote;
+    const privacyAnchor = document.createElement("a");
+    privacyAnchor.href = "/privacy";
+    privacyAnchor.target = "_blank";
+    privacyAnchor.rel = "noopener";
+    privacyAnchor.textContent = s.privacyLink;
+    footer.append(footerText, privacyAnchor);
     root.append(footer);
   };
 

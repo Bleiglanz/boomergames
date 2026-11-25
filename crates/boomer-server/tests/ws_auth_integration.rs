@@ -163,6 +163,17 @@ async fn status_endpoint_reports_health_and_degradation() {
     assert_eq!(body["db"], "ok");
     assert_eq!(body["online"], 0);
 
+    // Public plain-text privacy policy for Google OAuth consent screen.
+    let priv_resp = client
+        .get(format!("{}/privacy", srv.base_http))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(priv_resp.status(), 200);
+    let priv_text = priv_resp.text().await.unwrap();
+    assert!(priv_text.contains("Email address"));
+    assert!(priv_text.contains("Delete Account"));
+
     // A degraded backing store returns HTTP 503.
     let degraded = spawn_test_server().await;
     degraded.repos.set_healthy(false);

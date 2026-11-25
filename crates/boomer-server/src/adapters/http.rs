@@ -5,7 +5,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, X_CONTENT_TYPE_OPTIONS};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -29,7 +31,63 @@ const STRICT_CSP: &str = "default-src 'self'; \
     img-src 'self' data: https://lh3.googleusercontent.com; \
     frame-ancestors 'none'";
 
-/// Builds the complete `axum` [`Router`] exposing only the SPA, `/ws`, and `/status`.
+/// Plain-text bilingual privacy policy served at `GET /privacy` (required for Google OAuth).
+const PRIVACY_POLICY: &str = "\
+Boomergames — Privacy Policy / Datenschutzerklaerung
+https://games.bleiglanz.info
+
+ENGLISH
+=======
+Boomergames is a 100% free, non-commercial Checkers and 8-Ball Pool portal.
+
+1. Data collected when you sign in (Google Sign-In or Email Magic Link):
+   - Email address: used solely to identify your account and restore your
+     nickname, ratings, and match history across logins.
+   - Google account ID (sub) and initial suggested name (when using Google
+     Sign-In): used to verify your Google login and pre-fill your initial
+     nickname.
+   - Nickname and built-in avatar choice: displayed to other players in the
+     lounge and games. You may change your nickname on every login.
+   - Game statistics: Elo ratings, win counts, and recent match summaries.
+
+2. Guest play:
+   - Playing as a guest requires no email or account. Only an ephemeral guest
+     reconnect token and UI preferences (language, sound, high contrast) are
+     stored locally in your browser's localStorage.
+
+3. No cookies, no ads, no tracking:
+   - Boomergames sets zero HTTP cookies, displays no ads, uses no analytics or
+     tracking scripts, and never sells or shares your data with third parties.
+
+4. Deleting your data:
+   - You can permanently delete your account, email address, and statistics at
+     any time from the Online Lounge: click your name -> Delete Account.
+
+DEUTSCH
+=======
+Boomergames ist ein 100 % kostenloses, nicht-kommerzielles Dame- und
+8-Ball-Billard-Portal.
+
+1. Gespeicherte Daten bei Anmeldung (Google-Login oder E-Mail-Magic-Link):
+   - E-Mail-Adresse: ausschliesslich zur Kontozuordnung sowie zum Wiederherstellen
+     von Spitzname, Wertung und Spielverlauf bei erneuter Anmeldung.
+   - Google-Konto-ID (sub) und Namensvorschlag (bei Google-Anmeldung): zur
+     Verifizierung des Logins und als erster Spitznamen-Vorschlag.
+   - Spitzname und Avatar: sichtbar fuer andere Spieler in der Lounge und im Spiel
+     (bei jedem Login aenderbar).
+   - Spielstatistiken: Elo-Wertungen, Siege und letzte Partien.
+
+2. Keine Cookies, keine Werbung, kein Tracking:
+   - Boomergames setzt keine Cookies, zeigt keine Werbung, nutzt keine
+     Analyse- oder Tracking-Dienste und gibt keine Daten an Dritte weiter.
+
+3. Loeschung deiner Daten:
+   - Du kannst dein Konto samt E-Mail-Adresse und Statistiken jederzeit selbst
+     dauerhaft loeschen: in der Online-Lounge auf deinen Namen klicken ->
+     Konto loeschen.
+";
+
+/// Builds the complete `axum` [`Router`] exposing only the SPA, `/ws`, `/status`, and `/privacy`.
 pub fn build_router(state: AppState) -> Router {
     let static_root = PathBuf::from(&state.config.static_dir);
     let assets_dir = static_root.join("assets");
@@ -50,6 +108,7 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/status", get(status_handler))
+        .route("/privacy", get(privacy_handler))
         .route("/ws", get(ws_upgrade_handler))
         .merge(assets_service)
         .fallback_service(spa_service)
@@ -112,4 +171,11 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (code, Json(payload))
+}
+
+async fn privacy_handler() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+        PRIVACY_POLICY,
+    )
 }

@@ -23,6 +23,7 @@ export interface Strings {
   readonly statusLabel: string;
   readonly modeLabel: string;
   readonly footerNote: string;
+  readonly privacyLink: string;
   readonly player1: string;
   readonly player2: string;
   readonly computer: string;
@@ -195,6 +196,7 @@ const EN: Strings = {
   statusLabel: "Status",
   modeLabel: "Mode",
   footerNote: "100% free · No cookies · Runs locally in Rust/WebAssembly",
+  privacyLink: "Privacy Policy",
   player1: "Player 1",
   player2: "Player 2",
   computer: "Computer",
@@ -366,6 +368,7 @@ const DE: Strings = {
   statusLabel: "Status",
   modeLabel: "Modus",
   footerNote: "100 % kostenlos · Keine Cookies · Läuft lokal in Rust/WebAssembly",
+  privacyLink: "Datenschutz",
   player1: "Spieler 1",
   player2: "Spieler 2",
   computer: "Computer",
