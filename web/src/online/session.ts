@@ -550,11 +550,15 @@ export class OnlineSession {
         if (typeof d.guest === "string") {
           writeStorage(GUEST_KEY, d.guest);
         }
+        // Clear any stale pre-reconnect table state; if a paused match is still live,
+        // the server immediately follows `welcome` with a fresh `table.snapshot`.
+        this.state.activeTable = null;
+        this.latestGameFrameJson = null;
         const rooms = (d.rooms as RoomSummaryDto[] | undefined) ?? [];
         this.state.rooms = rooms;
         this.flushIntents();
         const targetRoom = this.state.activeRoom ?? rooms[0]?.id ?? null;
-        if (targetRoom !== null && this.state.activeTable === null) {
+        if (targetRoom !== null) {
           this.send("lobby.join", { room: targetRoom });
         }
         break;
@@ -572,6 +576,13 @@ export class OnlineSession {
         this.state.lobbyChat = [...snap.chat];
         this.state.onlineCount = snap.online;
         this.state.ignored = new Set(snap.ignored ?? []);
+        if (
+          this.state.activeTable !== null &&
+          !snap.tables.some((t) => t.id === this.state.activeTable?.id)
+        ) {
+          this.state.activeTable = null;
+          this.latestGameFrameJson = null;
+        }
         break;
       }
       case "user.add": {
@@ -609,6 +620,10 @@ export class OnlineSession {
       case "table.remove": {
         const id = String(d.id ?? "");
         this.state.tables = this.state.tables.filter((t) => t.id !== id);
+        if (this.state.activeTable?.id === id) {
+          this.state.activeTable = null;
+          this.latestGameFrameJson = null;
+        }
         break;
       }
       case "chat": {
@@ -745,7 +760,10 @@ export class OnlineSession {
           this.state.needsNicknameReview = false;
           this.state.authNotice = null;
         } else {
-          // Prompt the user to confirm or change their nickname on every login.
+          // Fresh login replaces any pre-login guest table on the server;
+          // prompt the user to confirm or change their nickname on every login.
+          this.state.activeTable = null;
+          this.latestGameFrameJson = null;
           this.state.needsNicknameReview = true;
           this.state.authNotice = "signed_in";
         }

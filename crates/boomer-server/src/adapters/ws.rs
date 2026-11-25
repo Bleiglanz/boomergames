@@ -882,8 +882,10 @@ async fn join_lobby_room(
         return session.send_error(ErrorCode::Invalid, "lobby.join");
     };
 
-    // Leave any active table and previous room when switching rooms explicitly.
+    // Leave any active table when switching to a different room.
+    let switching_room = session.active_room.as_deref() != Some(room_id);
     if leave_active_table
+        && switching_room
         && let Some(tid) = state.hub.user_table(&session.user.id)
         && let Some(table) = state.hub.find_table(&tid)
     {
