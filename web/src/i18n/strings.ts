@@ -65,6 +65,10 @@ export interface Strings {
   readonly poolBallInHandBehind: string;
   readonly poolCallPocketHint: string;
   readonly poolShootBtn: string;
+  readonly poolFullscreenBtn: string;
+  readonly poolExitFullscreenBtn: string;
+  readonly poolReset2DBtn: string;
+  readonly poolFullscreenHint: string;
   readonly poolRerackBtn: string;
   readonly poolSpinLabel: string;
   readonly poolSpinCenter: string;
@@ -237,6 +241,10 @@ const EN: Strings = {
   poolBallInHandBehind: "Ball in hand — drag cue ball behind the head string, then pull back to shoot.",
   poolCallPocketHint: "Click a pocket to call your 8-ball shot.",
   poolShootBtn: "Shoot! (Space)",
+  poolFullscreenBtn: "⛶ Full Screen (F)",
+  poolExitFullscreenBtn: "✕ Exit Full Screen",
+  poolReset2DBtn: "↺ Top-Down 2D",
+  poolFullscreenHint: "Left-drag: shoot · Right-drag / Shift+drag / Scroll / WASD: view · F: exit",
   poolRerackBtn: "Re-Rack Table",
   poolSpinLabel: "English (Spin)",
   poolSpinCenter: "Center",
@@ -409,6 +417,10 @@ const DE: Strings = {
   poolBallInHandBehind: "Ball in Hand — Weiße hinter der Kopflinie platzieren, dann zurückziehen & loslassen.",
   poolCallPocketHint: "Klicke auf eine Tasche, um die 8 anzusagen.",
   poolShootBtn: "Stoß! (Leertaste)",
+  poolFullscreenBtn: "⛶ Vollbild (F)",
+  poolExitFullscreenBtn: "✕ Vollbild beenden",
+  poolReset2DBtn: "↺ 2D Draufsicht",
+  poolFullscreenHint: "Links ziehen: Stoß · Rechts/Shift ziehen / Rad / WASD: Ansicht · F: zurück",
   poolRerackBtn: "Neu aufbauen",
   poolSpinLabel: "Effet (Spin)",
   poolSpinCenter: "Mitte",

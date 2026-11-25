@@ -239,6 +239,9 @@ interface PoolWidgets {
   readonly powerMask: HTMLElement;
   readonly powerReadout: HTMLElement;
   readonly sideControls: PoolSideControls;
+  readonly fsRoot: HTMLElement;
+  readonly reset2DBtn: HTMLButtonElement;
+  readonly fsToggleBtn: HTMLButtonElement;
 }
 
 interface InlineTableChat {
@@ -297,6 +300,54 @@ async function bootstrap(): Promise<void> {
   let liveRegion: HTMLElement | null = null;
   let contrastBtnRef: HTMLButtonElement | null = null;
   let lastAnnouncement = "";
+  let poolFullscreen = false;
+
+  const setPoolFullscreen = (enabled: boolean): void => {
+    const shell = mountedShell;
+    if (shell === null || shell.game !== "pool" || shell.poolWidgets === null) {
+      poolFullscreen = false;
+      return;
+    }
+    if (poolFullscreen === enabled) {
+      return;
+    }
+    poolFullscreen = enabled;
+    const fsRoot = shell.poolWidgets.fsRoot;
+    fsRoot.classList.toggle("pool-fullscreen-active", enabled);
+    shell.stage.setPoolFullscreen(enabled);
+
+    if (enabled) {
+      if (document.fullscreenElement === null && typeof fsRoot.requestFullscreen === "function") {
+        void fsRoot.requestFullscreen().catch(() => {
+          // Graceful CSS fixed-viewport fullscreen fallback when browser blocks native fullscreen.
+        });
+      }
+    } else if (document.fullscreenElement === fsRoot && typeof document.exitFullscreen === "function") {
+      void document.exitFullscreen().catch(() => {
+        // Ignore already-exited fullscreen state.
+      });
+    }
+
+    const s = getStrings(activeBridge().viewModel().lang);
+    shell.poolWidgets.fsToggleBtn.textContent = enabled
+      ? s.poolExitFullscreenBtn
+      : s.poolFullscreenBtn;
+    shell.poolWidgets.fsToggleBtn.className = enabled
+      ? "classic-btn active-toggle"
+      : "classic-btn";
+    shell.poolWidgets.reset2DBtn.style.display = "none";
+    window.requestAnimationFrame(() => {
+      if (mountedShell !== null) {
+        mountedShell.stage.resize(mountedShell.canvasHost);
+      }
+    });
+  };
+
+  document.addEventListener("fullscreenchange", () => {
+    if (poolFullscreen && document.fullscreenElement === null) {
+      setPoolFullscreen(false);
+    }
+  });
 
   const currentOnlineMatch = (): ActiveOnlineMatch | null => {
     if (!onlineView) {
@@ -444,6 +495,12 @@ async function bootstrap(): Promise<void> {
   };
 
   const disposeShell = (): void => {
+    if (poolFullscreen) {
+      poolFullscreen = false;
+      if (document.fullscreenElement !== null && typeof document.exitFullscreen === "function") {
+        void document.exitFullscreen().catch(() => {});
+      }
+    }
     if (mountedShell !== null) {
       mountedShell.stage.dispose();
       mountedShell = null;
@@ -647,22 +704,59 @@ async function bootstrap(): Promise<void> {
       }
 
       let poolWidgets: PoolWidgets | null = null;
+      let reset2DBtnRef: HTMLButtonElement | null = null;
       if (vm.screen.game === "pool") {
         const landscapeNote = document.createElement("div");
         landscapeNote.className = "landscape-hint";
         landscapeNote.textContent = s.landscapeHint;
         boardCol.append(landscapeNote);
 
+        const fsBar = document.createElement("div");
+        fsBar.className = "pool-fs-bar";
+        const reset2DBtn = makeButton(s.poolReset2DBtn, () => {
+          mountedShell?.stage.resetCamera2D();
+        });
+        reset2DBtn.style.display = "none";
+        reset2DBtnRef = reset2DBtn;
+        const exitFsBtn = makeButton(
+          s.poolExitFullscreenBtn,
+          () => setPoolFullscreen(false),
+          { primary: true },
+        );
+        fsBar.append(reset2DBtn, exitFsBtn);
+        boardCol.append(fsBar);
+
         const stageRow = document.createElement("div");
         stageRow.className = "pool-stage-row";
 
         const { box: spinBox, spinDot } = buildSpinWidget(s, dispatchAndRender);
         const { box: powerBox, powerMask, powerReadout } = buildPowerWidget(s, dispatchAndRender);
-        const sideControls = buildPoolSideControls(sideControlsHost, s, dispatchAndRender);
-        poolWidgets = { spinDot, powerMask, powerReadout, sideControls };
+        const fsToggleBtn = makeButton(s.poolFullscreenBtn, () =>
+          setPoolFullscreen(!poolFullscreen),
+        );
+        const sideControls = buildPoolSideControls(
+          sideControlsHost,
+          s,
+          dispatchAndRender,
+          fsToggleBtn,
+        );
+        poolWidgets = {
+          spinDot,
+          powerMask,
+          powerReadout,
+          sideControls,
+          fsRoot: boardCol,
+          reset2DBtn,
+          fsToggleBtn,
+        };
 
         stageRow.append(spinBox, frame, powerBox);
         boardCol.append(stageRow);
+
+        const fsHint = document.createElement("div");
+        fsHint.className = "pool-fs-hint";
+        fsHint.textContent = s.poolFullscreenHint;
+        boardCol.append(fsHint);
       } else {
         boardCol.append(frame);
       }
@@ -688,6 +782,11 @@ async function bootstrap(): Promise<void> {
           onPlaceCue: (x, y) => dispatchAndRender({ kind: "pool_place_cue", x, y }),
           onCancelCuePreview: () => dispatchAndRender({ kind: "pool_cancel_cue_preview" }),
           onCallPocket: (pocket) => dispatchAndRender({ kind: "pool_call_pocket", pocket }),
+        },
+        onPool3DChange: (is3D) => {
+          if (reset2DBtnRef !== null) {
+            reset2DBtnRef.style.display = is3D && poolFullscreen ? "inline-block" : "none";
+          }
         },
       });
       stage.setGame(vm.screen.game);
@@ -758,6 +857,44 @@ async function bootstrap(): Promise<void> {
 
     if (isNativeControl || target instanceof HTMLInputElement) {
       return;
+    }
+
+    if ((ev.key === "f" || ev.key === "F") && !ev.repeat) {
+      ev.preventDefault();
+      setPoolFullscreen(!poolFullscreen);
+      return;
+    }
+
+    if (poolFullscreen) {
+      if (ev.key === "Escape") {
+        setPoolFullscreen(false);
+        return;
+      }
+      if (ev.key === "w" || ev.key === "W") {
+        ev.preventDefault();
+        mountedShell.stage.nudgeCamera3D(0.14, 0);
+        return;
+      }
+      if (ev.key === "s" || ev.key === "S") {
+        ev.preventDefault();
+        mountedShell.stage.nudgeCamera3D(-0.14, 0);
+        return;
+      }
+      if (ev.key === "a" || ev.key === "A") {
+        ev.preventDefault();
+        mountedShell.stage.nudgeCamera3D(0, -0.18);
+        return;
+      }
+      if (ev.key === "d" || ev.key === "D") {
+        ev.preventDefault();
+        mountedShell.stage.nudgeCamera3D(0, 0.18);
+        return;
+      }
+      if (ev.key === "r" || ev.key === "R") {
+        ev.preventDefault();
+        mountedShell.stage.resetCamera2D();
+        return;
+      }
     }
 
     const vm = activeBridge().viewModel();
@@ -1015,6 +1152,7 @@ function buildPoolSideControls(
   host: HTMLElement,
   s: Strings,
   dispatch: (input: UiInput) => void,
+  fsToggleBtn: HTMLButtonElement,
 ): PoolSideControls {
   host.innerHTML = "";
   const heading = document.createElement("h2");
@@ -1026,6 +1164,10 @@ function buildPoolSideControls(
   const shootBtn = makeButton(s.poolShootBtn, () => dispatch({ kind: "pool_shoot" }), {
     primary: true,
   });
+
+  const primaryActions = document.createElement("div");
+  primaryActions.className = "control-row";
+  primaryActions.append(shootBtn, fsToggleBtn);
 
   // Persistent fine-aim slider (0.1 deg steps) so dragging is never interrupted by DOM re-renders.
   const aimGroup = document.createElement("div");
@@ -1151,7 +1293,7 @@ function buildPoolSideControls(
   host.append(
     heading,
     modeBox,
-    shootBtn,
+    primaryActions,
     aimGroup,
     controls.aidGroup,
     controls.timerGroup,
