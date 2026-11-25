@@ -811,28 +811,28 @@ export class PoolScene {
       this.root.add(cush);
     }
 
-    // 3. Raised 3D mahogany rail frame (4 solid beams around cushions, top at z = 0.048)
+    // 3. Raised 3D mahogany rail frame (split around pocket openings so pockets are truly open!)
     const railW = POOL_RAIL_MARGIN - cushThick;
     const railH = 0.056;
     const railZ = 0.02; // spans z = -0.008 .. +0.048
-    // Top & bottom mahogany rails
-    for (const y of [
-      -cushThick - railW / 2,
-      POOL_TABLE_HEIGHT + cushThick + railW / 2,
-    ]) {
-      const beam = new THREE.Mesh(new THREE.BoxGeometry(outerW, railW, railH), railWoodMat);
-      beam.position.set(cx, y, railZ);
-      this.root.add(beam);
+    const railHalfSpan = POOL_TABLE_WIDTH / 2 - 0.124;
+    const railLeftX = 0.062 + railHalfSpan / 2;
+    const railRightX = POOL_TABLE_WIDTH - 0.062 - railHalfSpan / 2;
+    // Top & bottom mahogany rail segments (left and right of side pockets)
+    for (const segX of [railLeftX, railRightX]) {
+      for (const y of [-cushThick - railW / 2, POOL_TABLE_HEIGHT + cushThick + railW / 2]) {
+        const beam = new THREE.Mesh(
+          new THREE.BoxGeometry(railHalfSpan, railW, railH),
+          railWoodMat,
+        );
+        beam.position.set(segX, y, railZ);
+        this.root.add(beam);
+      }
     }
-    // Left & right mahogany rails
-    for (const x of [
-      -cushThick - railW / 2,
-      POOL_TABLE_WIDTH + cushThick + railW / 2,
-    ]) {
-      const beam = new THREE.Mesh(
-        new THREE.BoxGeometry(railW, POOL_TABLE_HEIGHT + cushThick * 2, railH),
-        railWoodMat,
-      );
+    // Left & right mahogany rail segments (between corner pockets)
+    const railEndSpan = POOL_TABLE_HEIGHT - 0.124;
+    for (const x of [-cushThick - railW / 2, POOL_TABLE_WIDTH + cushThick + railW / 2]) {
+      const beam = new THREE.Mesh(new THREE.BoxGeometry(railW, railEndSpan, railH), railWoodMat);
       beam.position.set(x, cy, railZ);
       this.root.add(beam);
     }
@@ -885,20 +885,85 @@ export class PoolScene {
       }
     }
 
-    // 5. 6 3D brass pocket castings + recessed dark pocket wells
-    const capGeo = new THREE.CylinderGeometry(0.076, 0.078, 0.056, 24);
-    capGeo.rotateX(Math.PI / 2);
-    const pocketWellGeo = new THREE.CylinderGeometry(0.058, 0.054, 0.088, 24);
-    pocketWellGeo.rotateX(Math.PI / 2);
+    // 5. 6 open-throat 3D pockets: flush opening at cloth level (z=0.0015) + recessed drop well
+    //    + flush corner/side brass castings wrapping ONLY the outer rail perimeter (mouth wide open!)
+    const pocketMouthGeo = new THREE.CircleGeometry(0.058, 28);
+    const pocketWellWallGeo = new THREE.CylinderGeometry(0.058, 0.054, 0.08, 24, 1, true);
+    pocketWellWallGeo.rotateX(Math.PI / 2);
 
-    for (const [px, py] of POCKET_COORDS) {
-      const cap = new THREE.Mesh(capGeo, brassMat);
-      cap.position.set(px, py, 0.022);
-      this.root.add(cap);
+    // Reusable bottom-left corner casting (open toward +X, +Y cloth; flush with rails & outer trim)
+    const cornerShape = new THREE.Shape();
+    cornerShape.moveTo(0.058, 0);
+    cornerShape.lineTo(0.064, -cushThick);
+    cornerShape.lineTo(0.064, -POOL_RAIL_MARGIN);
+    cornerShape.lineTo(-POOL_RAIL_MARGIN, -POOL_RAIL_MARGIN);
+    cornerShape.lineTo(-POOL_RAIL_MARGIN, 0.064);
+    cornerShape.lineTo(-cushThick, 0.064);
+    cornerShape.lineTo(0, 0.058);
+    cornerShape.absarc(0, 0, 0.058, Math.PI * 0.5, Math.PI * 2, false);
+    cornerShape.closePath();
+    const cornerCastingGeo = new THREE.ExtrudeGeometry(cornerShape, {
+      depth: 0.05,
+      bevelEnabled: false,
+      curveSegments: 24,
+    });
 
-      const hole = new THREE.Mesh(pocketWellGeo, pocketMat);
-      hole.position.set(px, py, 0.008);
-      this.root.add(hole);
+    // Reusable bottom side-pocket casting (open toward +Y cloth; flush with rails & outer trim)
+    const sideOuterY = -(POOL_RAIL_MARGIN - 0.018);
+    const sideCushY = -(cushThick - 0.018);
+    const sideShape = new THREE.Shape();
+    sideShape.moveTo(-0.058, 0);
+    sideShape.lineTo(-0.064, sideCushY);
+    sideShape.lineTo(-0.064, sideOuterY);
+    sideShape.lineTo(0.064, sideOuterY);
+    sideShape.lineTo(0.064, sideCushY);
+    sideShape.lineTo(0.058, 0);
+    sideShape.absarc(0, 0, 0.058, 0, -Math.PI, true);
+    sideShape.closePath();
+    const sideCastingGeo = new THREE.ExtrudeGeometry(sideShape, {
+      depth: 0.05,
+      bevelEnabled: false,
+      curveSegments: 24,
+    });
+
+    const cornerSpecs: readonly (readonly [number, number, number])[] = [
+      [0, 0, 0],
+      [POOL_TABLE_WIDTH, 0, Math.PI * 0.5],
+      [POOL_TABLE_WIDTH, POOL_TABLE_HEIGHT, Math.PI],
+      [0, POOL_TABLE_HEIGHT, Math.PI * 1.5],
+    ];
+    for (const [px, py, rotZ] of cornerSpecs) {
+      const mouth = new THREE.Mesh(pocketMouthGeo, pocketMat);
+      mouth.position.set(px, py, 0.0015);
+      this.root.add(mouth);
+
+      const well = new THREE.Mesh(pocketWellWallGeo, pocketMat);
+      well.position.set(px, py, -0.04);
+      this.root.add(well);
+
+      const casting = new THREE.Mesh(cornerCastingGeo, brassMat);
+      casting.position.set(px, py, -0.001);
+      casting.rotation.z = rotZ;
+      this.root.add(casting);
+    }
+
+    const sideSpecs: readonly (readonly [number, number, number])[] = [
+      [POOL_TABLE_WIDTH / 2, -0.018, 0],
+      [POOL_TABLE_WIDTH / 2, POOL_TABLE_HEIGHT + 0.018, Math.PI],
+    ];
+    for (const [px, py, rotZ] of sideSpecs) {
+      const mouth = new THREE.Mesh(pocketMouthGeo, pocketMat);
+      mouth.position.set(px, py, 0.0015);
+      this.root.add(mouth);
+
+      const well = new THREE.Mesh(pocketWellWallGeo, pocketMat);
+      well.position.set(px, py, -0.04);
+      this.root.add(well);
+
+      const casting = new THREE.Mesh(sideCastingGeo, brassMat);
+      casting.position.set(px, py, -0.001);
+      casting.rotation.z = rotZ;
+      this.root.add(casting);
     }
 
     // 6. Hidden under-table 3D mahogany cabinet apron & 4 carved legs (100% occluded from straight +Z!)
