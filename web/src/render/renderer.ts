@@ -15,7 +15,7 @@ import type { CheckersView, GameKindDto, PoolView } from "../wasm_bridge.js";
 export interface StageCallbacks {
   readonly checkers: CheckersBoardCallbacks;
   readonly pool: PoolTableCallbacks;
-  readonly onPool3DChange?: (is3D: boolean) => void;
+  readonly on3DChange?: (is3D: boolean) => void;
 }
 
 const PERSP_FOV_DEG = 42;
@@ -26,7 +26,9 @@ const FELT_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), -BALL_RADIUS);
 const CHECKERS_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
 const BG_POOL_2D = new THREE.Color(0x182b1c);
 const BG_POOL_3D = new THREE.Color(0x120d0a);
-const BG_POOL_WORK = new THREE.Color(0x182b1c);
+const BG_CHECKERS_2D = new THREE.Color(0x3a2a1e);
+const BG_CHECKERS_3D = new THREE.Color(0x17100b);
+const BG_WORK = new THREE.Color(0x182b1c);
 
 export class StageRenderer {
   private readonly renderer: THREE.WebGLRenderer;
@@ -39,7 +41,7 @@ export class StageRenderer {
   private readonly scene: THREE.Scene;
   private readonly poolScene: PoolScene;
   private readonly checkersScene: CheckersScene;
-  private readonly onPool3DChange?: (is3D: boolean) => void;
+  private readonly on3DChange?: (is3D: boolean) => void;
   private activeGame: GameKindDto | null = null;
   private readonly canvas: HTMLCanvasElement;
   private readonly container: HTMLElement;
@@ -48,7 +50,7 @@ export class StageRenderer {
   private orthoHalfH = 1;
 
   // Fullscreen hidden 3D camera orbit state (starts strictly at 0 = orthogonal top-down!)
-  private poolFullscreen = false;
+  private gameFullscreen = false;
   private camTilt = 0;
   private camAzimuth = 0;
   private camZoom = 1.0;
@@ -78,7 +80,7 @@ export class StageRenderer {
 
   public constructor(container: HTMLElement, callbacks: StageCallbacks) {
     this.container = container;
-    this.onPool3DChange = callbacks.onPool3DChange;
+    this.on3DChange = callbacks.on3DChange;
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "default" });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.canvas = this.renderer.domElement;
@@ -93,7 +95,7 @@ export class StageRenderer {
     this.orthoCamera.position.set(0, 0, 5);
     this.orthoCamera.lookAt(0, 0, 0);
 
-    this.perspCamera = new THREE.PerspectiveCamera(PERSP_FOV_DEG, 1, 0.05, 40);
+    this.perspCamera = new THREE.PerspectiveCamera(PERSP_FOV_DEG, 1, 0.05, 60);
 
     this.poolScene = new PoolScene(callbacks.pool);
     this.checkersScene = new CheckersScene(callbacks.checkers);
@@ -101,7 +103,7 @@ export class StageRenderer {
     this.scene.add(this.checkersScene.root);
 
     this.onContextMenuBound = (ev: MouseEvent): void => {
-      if (this.activeGame === "pool") {
+      if (this.activeGame === "pool" || (this.activeGame === "checkers" && this.gameFullscreen)) {
         ev.preventDefault();
       }
     };
@@ -109,8 +111,12 @@ export class StageRenderer {
     this.onPointerDownBound = (ev: PointerEvent): void => {
       if (ev.pointerType === "touch") {
         this.activeTouches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
-        if (this.poolFullscreen && this.activeGame === "pool" && this.activeTouches.size === 2) {
-          this.poolScene.cancelSlingshot();
+        if (this.gameFullscreen && this.activeGame !== null && this.activeTouches.size === 2) {
+          if (this.activeGame === "pool") {
+            this.poolScene.cancelSlingshot();
+          } else {
+            this.checkersScene.cancelDrag();
+          }
           const pts = Array.from(this.activeTouches.values());
           const a = pts[0];
           const b = pts[1];
@@ -122,11 +128,16 @@ export class StageRenderer {
         }
       }
 
+      const busyPrimaryDrag =
+        this.activeGame === "pool"
+          ? this.poolScene.isSlingshotActive()
+          : this.checkersScene.isDragActive();
+
       const wantsOrbit =
-        this.poolFullscreen &&
-        this.activeGame === "pool" &&
+        this.gameFullscreen &&
+        this.activeGame !== null &&
         (ev.button === 1 ||
-          (ev.button === 2 && !this.poolScene.isSlingshotActive()) ||
+          (ev.button === 2 && !busyPrimaryDrag) ||
           (ev.button === 0 && ev.shiftKey));
 
       if (wantsOrbit) {
@@ -140,6 +151,10 @@ export class StageRenderer {
 
       if (ev.button === 2 && this.activeGame === "pool") {
         this.poolScene.cancelSlingshot();
+        return;
+      }
+      if (ev.button === 2 && this.activeGame === "checkers") {
+        this.checkersScene.cancelDrag();
         return;
       }
 
@@ -156,7 +171,7 @@ export class StageRenderer {
     this.onPointerMoveBound = (ev: PointerEvent): void => {
       if (ev.pointerType === "touch" && this.activeTouches.has(ev.pointerId)) {
         this.activeTouches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
-        if (this.poolFullscreen && this.activeGame === "pool" && this.activeTouches.size === 2) {
+        if (this.gameFullscreen && this.activeGame !== null && this.activeTouches.size === 2) {
           const pts = Array.from(this.activeTouches.values());
           const a = pts[0];
           const b = pts[1];
@@ -219,7 +234,7 @@ export class StageRenderer {
     };
 
     this.onWheelBound = (ev: WheelEvent): void => {
-      if (!this.poolFullscreen || this.activeGame !== "pool") {
+      if (!this.gameFullscreen || this.activeGame === null) {
         return;
       }
       ev.preventDefault();
@@ -260,43 +275,49 @@ export class StageRenderer {
     this.activeGame = game;
     this.poolScene.root.visible = game === "pool";
     this.checkersScene.root.visible = game === "checkers";
-    this.scene.background = new THREE.Color(game === "pool" ? 0x182b1c : 0x3a2a1e);
-    if (game !== "pool") {
-      this.setPoolFullscreen(false);
-    }
+    this.scene.background = game === "pool" ? BG_POOL_2D : BG_CHECKERS_2D;
+    this.setGameFullscreen(false);
     this.updateCameraProjection(this.lastAspect);
   }
 
-  public setPoolFullscreen(enabled: boolean): void {
-    this.poolFullscreen = enabled;
+  public setGameFullscreen(enabled: boolean): void {
+    this.gameFullscreen = enabled;
+    const [cx, cy] = this.defaultCenter();
     if (!enabled) {
       // Snap cleanly back to classic 2D orthogonal top-down when exiting fullscreen
       this.targetTilt = 0;
       this.targetAzimuth = 0;
       this.targetZoom = 1.0;
-      this.targetLookX = POOL_TABLE_WIDTH / 2;
-      this.targetLookY = POOL_TABLE_HEIGHT / 2;
+      this.targetLookX = cx;
+      this.targetLookY = cy;
       this.camTilt = 0;
       this.camAzimuth = 0;
       this.camZoom = 1.0;
-      this.camLookX = POOL_TABLE_WIDTH / 2;
-      this.camLookY = POOL_TABLE_HEIGHT / 2;
+      this.camLookX = cx;
+      this.camLookY = cy;
       this.poolScene.set3DVisualBlend(0);
+      this.checkersScene.set3DVisualBlend(0);
       this.report3DState(false);
+    } else {
+      this.targetLookX = cx;
+      this.targetLookY = cy;
+      this.camLookX = cx;
+      this.camLookY = cy;
     }
     this.updateCameraProjection(this.lastAspect);
   }
 
   public resetCamera2D(): void {
+    const [cx, cy] = this.defaultCenter();
     this.targetTilt = 0;
     this.targetAzimuth = 0;
     this.targetZoom = 1.0;
-    this.targetLookX = POOL_TABLE_WIDTH / 2;
-    this.targetLookY = POOL_TABLE_HEIGHT / 2;
+    this.targetLookX = cx;
+    this.targetLookY = cy;
   }
 
   public setBehindCueCamera(): void {
-    if (!this.poolFullscreen || this.activeGame !== "pool") {
+    if (!this.gameFullscreen || this.activeGame !== "pool") {
       return;
     }
     const aim = this.poolScene.getCueAimState();
@@ -319,13 +340,14 @@ export class StageRenderer {
   }
 
   public nudgeCamera3D(dTilt: number, dAzimuth: number): void {
-    if (!this.poolFullscreen || this.activeGame !== "pool") {
+    if (!this.gameFullscreen || this.activeGame === null) {
       return;
     }
+    const [cx, cy] = this.defaultCenter();
     this.targetTilt = Math.max(0, Math.min(MAX_TILT_RAD, this.targetTilt + dTilt));
     this.targetAzimuth += dAzimuth;
-    this.targetLookX = POOL_TABLE_WIDTH / 2;
-    this.targetLookY = POOL_TABLE_HEIGHT / 2;
+    this.targetLookX = cx;
+    this.targetLookY = cy;
   }
 
   public syncCheckers(view: CheckersView): void {
@@ -346,10 +368,10 @@ export class StageRenderer {
   }
 
   public render(poolFrame?: Float64Array, nowMs = performance.now()): void {
-    if (this.activeGame === "pool") {
-      if (poolFrame !== undefined) {
-        this.poolScene.syncBallsFromBuffer(poolFrame, nowMs);
-      }
+    if (this.activeGame === "pool" && poolFrame !== undefined) {
+      this.poolScene.syncBallsFromBuffer(poolFrame, nowMs);
+    }
+    if (this.activeGame !== null) {
       this.stepCamera3D();
     }
     const cam = this.activeCamera();
@@ -368,10 +390,16 @@ export class StageRenderer {
     this.renderer.dispose();
   }
 
+  private defaultCenter(): readonly [number, number] {
+    return this.activeGame === "checkers"
+      ? [4.0, 4.0]
+      : [POOL_TABLE_WIDTH / 2, POOL_TABLE_HEIGHT / 2];
+  }
+
   private isUsingPerspective(): boolean {
     return (
-      this.activeGame === "pool" &&
-      this.poolFullscreen &&
+      this.activeGame !== null &&
+      this.gameFullscreen &&
       (this.camTilt > 0.004 || Math.abs(this.camZoom - 1.0) > 0.004 || Math.abs(this.camAzimuth) > 0.004)
     );
   }
@@ -381,10 +409,11 @@ export class StageRenderer {
   }
 
   private applyOrbitDelta(dx: number, dy: number): void {
+    const [cx, cy] = this.defaultCenter();
     this.targetAzimuth -= dx * 0.0065;
     this.targetTilt = Math.max(0, Math.min(MAX_TILT_RAD, this.targetTilt + dy * 0.0065));
-    this.targetLookX = POOL_TABLE_WIDTH / 2;
-    this.targetLookY = POOL_TABLE_HEIGHT / 2;
+    this.targetLookX = cx;
+    this.targetLookY = cy;
   }
 
   private applyZoomFactor(factor: number): void {
@@ -412,17 +441,28 @@ export class StageRenderer {
     const in3D = this.isUsingPerspective();
     this.report3DState(in3D);
 
+    const isCheckers = this.activeGame === "checkers";
     if (!in3D) {
-      this.poolScene.set3DVisualBlend(0);
-      this.scene.background = BG_POOL_2D;
+      if (isCheckers) {
+        this.checkersScene.set3DVisualBlend(0);
+        this.scene.background = BG_CHECKERS_2D;
+      } else {
+        this.poolScene.set3DVisualBlend(0);
+        this.scene.background = BG_POOL_2D;
+      }
       return;
     }
 
-    // Smoothly blend lighting & pool-hall room backdrop as camera tilts off straight +Z
+    // Smoothly blend lighting & parlor room backdrop as camera tilts off straight +Z
     const blend = Math.min(1, this.camTilt / 0.28);
-    this.poolScene.set3DVisualBlend(blend);
-    BG_POOL_WORK.copy(BG_POOL_2D).lerp(BG_POOL_3D, blend);
-    this.scene.background = BG_POOL_WORK;
+    if (isCheckers) {
+      this.checkersScene.set3DVisualBlend(blend);
+      BG_WORK.copy(BG_CHECKERS_2D).lerp(BG_CHECKERS_3D, blend);
+    } else {
+      this.poolScene.set3DVisualBlend(blend);
+      BG_WORK.copy(BG_POOL_2D).lerp(BG_POOL_3D, blend);
+    }
+    this.scene.background = BG_WORK;
 
     // Singularity-free spherical orbit matching the exact orthographic framing at tilt=0
     const cx = this.camLookX;
@@ -448,7 +488,7 @@ export class StageRenderer {
   private report3DState(is3D: boolean): void {
     if (is3D !== this.lastReported3D) {
       this.lastReported3D = is3D;
-      this.onPool3DChange?.(is3D);
+      this.on3DChange?.(is3D);
     }
   }
 

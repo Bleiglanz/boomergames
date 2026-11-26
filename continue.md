@@ -56,7 +56,9 @@
   - **Brevo Magic-Link Dispatch Logging:** `LettreMailSender` logs `info!(smtp_host, recipient_domain, "dispatched magic-link email")` on successful SMTP send without leaking tokens or user addresses.
   - **VM Ops Hardening (`bleiglanzinfo`):** Provisioned persistent 1 GB `/swapfile` (`vm.swappiness=10`) and nightly PostgreSQL backup (`boomergames-backup.timer` → `/usr/local/sbin/boomergames-pg-backup.sh` → `/var/backups/boomergames/` with 7-day retention).
   - **3D Pool Pocket Drop Animation & Behind-Cue Camera Preset:** Purely visual 180 ms pocket chute drop-down animation (zero change to deterministic physics), `🎯 Behind Cue (C)` camera preset swinging behind the cue stick along the shot line, clamped low-angle raycast, forgiving 3D ball-in-hand grab radius, and zero-allocation per-frame background blending.
-  - **Checkers Continuous Full-Screen Mode:** Mirrored `⛶ Full Screen (F)` / `F` / `Esc` toggle for Checkers.
+  - **Checkers Continuous Full-Screen Mode & Hidden 3D Carved Wooden Board:** Mirrored `⛶ Full Screen (F)` / `F` / `Esc` toggle for Checkers with the same secret 2D→3D fullscreen reveal (right-drag / Shift+drag / scroll / 2-finger touch / `WASD` / `R` reset): carved walnut frame & stepped plinth, grained inlaid maple/walnut squares, fluted 3D wooden checkers, physically stacked double-height 3D Kings with brass collar & crown medallions, and parlor tabletop lighting.
+  - **Audio Polish & Master Volume Slider:** Added persisted zero-cookie `volume` slider in the header, dynamics compressor to prevent break-scatter clipping, reusable noise buffer, and upgraded procedural acoustics (chalked cue hit, jittered phenolic ball clicks, rubber cushion thuds, hollow pocket chute rattle, tactile hardwood checker clacks, and crowning triad).
+  - **3D Pool Cue Alignment & Rail Clearance Fix:** Anchored the cue pivot at exact ball-center height (`z = BALL_RADIUS`) with positive axial elevation (`cuePitchGroup`) dynamically clearing cushions, mahogany rails, brass castings, and rear balls without clipping or aim-line angle mismatch.
   - **Player Profile Modal & Match History UI:** Clicking any registered player in the Lounge Roster, High Scores table, or your own Account modal opens a classic Player Profile modal backed by `profile.get` (Pool & Checkers Elo, W/L/D stats, member-since date, and last 20 matches).
 
 ---
@@ -131,7 +133,5 @@
    - Confirm in Google Cloud Console that the OAuth consent screen is published to **Production** (so any external Gmail friend can sign in without being on a test-user allowlist) and has `https://games.bleiglanz.info/privacy` set as the Privacy Policy URL.
 
 ### Future Expansion Ideas (Backlog)
-- Sound volume slider & richer subtle cue/pocket acoustics.
 - Spectator count badge & live spectator list inside active online match HUD.
-- Optional hidden 3D carved wooden Checkers board & stacked king pieces reveal in Checkers fullscreen.
 - Optional third classic game (e.g., **Backgammon**, **Connect Four**, or **9-Ball Pool** reusing the exact `boomer-domain` Swept-CCD physics engine!).

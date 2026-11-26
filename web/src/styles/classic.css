@@ -1007,8 +1007,21 @@ body {
 
 .pool-fs-bar,
 .pool-fs-hint,
-.checkers-fs-bar {
+.checkers-fs-bar,
+.checkers-fs-hint {
   display: none;
+}
+
+.sound-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.volume-slider {
+  width: 78px;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
 .board-column.checkers-fullscreen-active {
@@ -1153,7 +1166,8 @@ body {
   backdrop-filter: blur(4px);
 }
 
-.board-column.pool-fullscreen-active .pool-fs-hint {
+.board-column.pool-fullscreen-active .pool-fs-hint,
+.board-column.checkers-fullscreen-active .checkers-fs-hint {
   position: absolute;
   left: 50%;
   bottom: 0.55rem;

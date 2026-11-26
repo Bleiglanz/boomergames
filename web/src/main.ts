@@ -274,7 +274,7 @@ async function bootstrap(): Promise<void> {
 
   const bridge = await WasmBridge.create();
   let prefs: UserPrefs = loadPrefs();
-  const synth = new SoundSynth(prefs.muted);
+  const synth = new SoundSynth(prefs.muted, prefs.volume);
 
   // Hydrate persisted zero-cookie localStorage preferences into WASM before first render.
   if (prefs.lang !== "en") {
@@ -316,6 +316,7 @@ async function bootstrap(): Promise<void> {
     checkersFullscreen = enabled;
     const fsRoot = shell.boardCol;
     fsRoot.classList.toggle("checkers-fullscreen-active", enabled);
+    shell.stage.setGameFullscreen(enabled);
 
     if (enabled) {
       if (document.fullscreenElement === null && typeof fsRoot.requestFullscreen === "function") {
@@ -349,7 +350,7 @@ async function bootstrap(): Promise<void> {
     poolFullscreen = enabled;
     const fsRoot = shell.poolWidgets.fsRoot;
     fsRoot.classList.toggle("pool-fullscreen-active", enabled);
-    shell.stage.setPoolFullscreen(enabled);
+    shell.stage.setGameFullscreen(enabled);
 
     if (enabled) {
       if (document.fullscreenElement === null && typeof fsRoot.requestFullscreen === "function") {
@@ -492,6 +493,7 @@ async function bootstrap(): Promise<void> {
       lang: vm.lang === "de" ? "de" : "en",
       highContrast: vm.highContrast,
       muted: synth.isMuted(),
+      volume: synth.getVolume(),
       checkersShowNumbers: showNums,
     };
     savePrefs(prefs);
@@ -657,11 +659,18 @@ async function bootstrap(): Promise<void> {
       );
     }
 
+    const soundWrap = document.createElement("div");
+    soundWrap.className = "sound-control-group";
+
     const soundBtn = makeButton(
       synth.isMuted() ? s.soundOff : s.soundOn,
       () => {
         synth.setMuted(!synth.isMuted());
         if (!synth.isMuted()) {
+          if (synth.getVolume() <= 0.01) {
+            synth.setVolume(0.75);
+            volRange.value = "75";
+          }
           synth.unlock();
         }
         soundBtn.textContent = synth.isMuted() ? s.soundOff : s.soundOn;
@@ -673,6 +682,33 @@ async function bootstrap(): Promise<void> {
     );
     soundBtn.setAttribute("aria-pressed", String(!synth.isMuted()));
 
+    const volRange = document.createElement("input");
+    volRange.type = "range";
+    volRange.className = "volume-slider";
+    volRange.min = "0";
+    volRange.max = "100";
+    volRange.step = "5";
+    volRange.value = String(Math.round(synth.getVolume() * 100));
+    volRange.title = `${s.soundVolume}: ${volRange.value}%`;
+    volRange.setAttribute("aria-label", s.soundVolume);
+    volRange.addEventListener("input", () => {
+      const nextVol = Number(volRange.value) / 100;
+      synth.setVolume(nextVol);
+      const shouldMute = nextVol <= 0.001;
+      if (synth.isMuted() !== shouldMute) {
+        synth.setMuted(shouldMute);
+        soundBtn.textContent = synth.isMuted() ? s.soundOff : s.soundOn;
+        soundBtn.className = synth.isMuted() ? "classic-btn" : "classic-btn active-toggle";
+        soundBtn.setAttribute("aria-pressed", String(!synth.isMuted()));
+      }
+      if (!shouldMute) {
+        synth.unlock();
+      }
+      volRange.title = `${s.soundVolume}: ${volRange.value}%`;
+      persistFromVm(activeBridge().viewModel());
+    });
+    soundWrap.append(soundBtn, volRange);
+
     const contrastBtn = makeButton(
       s.highContrast,
       () => dispatchAndRender({ kind: "toggle_high_contrast" }),
@@ -682,7 +718,7 @@ async function bootstrap(): Promise<void> {
     contrastBtnRef = contrastBtn;
 
     controls.append(
-      soundBtn,
+      soundWrap,
       contrastBtn,
       makeButton(vm.lang === "en" ? "Deutsch" : "English", () =>
         dispatchAndRender({ kind: "set_language", lang: vm.lang === "en" ? "de" : "en" }),
@@ -804,13 +840,23 @@ async function bootstrap(): Promise<void> {
       } else {
         const checkersFsBar = document.createElement("div");
         checkersFsBar.className = "checkers-fs-bar";
+        const resetCheckers2DBtn = makeButton(s.poolReset2DBtn, () => {
+          mountedShell?.stage.resetCamera2D();
+        });
+        resetCheckers2DBtn.style.display = "none";
+        reset2DBtnRef = resetCheckers2DBtn;
         const exitCheckersFsBtn = makeButton(
           s.poolExitFullscreenBtn,
           () => setCheckersFullscreen(false),
           { primary: true },
         );
-        checkersFsBar.append(exitCheckersFsBtn);
-        boardCol.append(checkersFsBar, frame);
+        checkersFsBar.append(resetCheckers2DBtn, exitCheckersFsBtn);
+
+        const checkersFsHint = document.createElement("div");
+        checkersFsHint.className = "checkers-fs-hint";
+        checkersFsHint.textContent = s.checkersFullscreenHint;
+
+        boardCol.append(checkersFsBar, frame, checkersFsHint);
       }
 
       shell.append(boardCol, sidePanelHost);
@@ -835,9 +881,10 @@ async function bootstrap(): Promise<void> {
           onCancelCuePreview: () => dispatchAndRender({ kind: "pool_cancel_cue_preview" }),
           onCallPocket: (pocket) => dispatchAndRender({ kind: "pool_call_pocket", pocket }),
         },
-        onPool3DChange: (is3D) => {
+        on3DChange: (is3D) => {
           if (reset2DBtnRef !== null) {
-            reset2DBtnRef.style.display = is3D && poolFullscreen ? "inline-block" : "none";
+            const anyFs = poolFullscreen || checkersFullscreen;
+            reset2DBtnRef.style.display = is3D && anyFs ? "inline-block" : "none";
           }
         },
       });
@@ -906,8 +953,27 @@ async function bootstrap(): Promise<void> {
       if ((ev.key === "f" || ev.key === "F") && !ev.repeat) {
         ev.preventDefault();
         setCheckersFullscreen(!checkersFullscreen);
-      } else if (checkersFullscreen && ev.key === "Escape") {
-        setCheckersFullscreen(false);
+        return;
+      }
+      if (checkersFullscreen) {
+        if (ev.key === "Escape") {
+          setCheckersFullscreen(false);
+        } else if (ev.key === "w" || ev.key === "W") {
+          ev.preventDefault();
+          mountedShell.stage.nudgeCamera3D(0.14, 0);
+        } else if (ev.key === "s" || ev.key === "S") {
+          ev.preventDefault();
+          mountedShell.stage.nudgeCamera3D(-0.14, 0);
+        } else if (ev.key === "a" || ev.key === "A") {
+          ev.preventDefault();
+          mountedShell.stage.nudgeCamera3D(0, -0.18);
+        } else if (ev.key === "d" || ev.key === "D") {
+          ev.preventDefault();
+          mountedShell.stage.nudgeCamera3D(0, 0.18);
+        } else if (ev.key === "r" || ev.key === "R") {
+          ev.preventDefault();
+          mountedShell.stage.resetCamera2D();
+        }
       }
       return;
     }

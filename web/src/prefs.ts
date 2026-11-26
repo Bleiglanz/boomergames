@@ -5,6 +5,7 @@ export interface UserPrefs {
   readonly lang: "en" | "de";
   readonly highContrast: boolean;
   readonly muted: boolean;
+  readonly volume: number;
   readonly checkersShowNumbers: boolean;
 }
 
@@ -14,8 +15,16 @@ const DEFAULT_PREFS: UserPrefs = {
   lang: "en",
   highContrast: false,
   muted: false,
+  volume: 0.75,
   checkersShowNumbers: false,
 };
+
+function clampVolume(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return DEFAULT_PREFS.volume;
+  }
+  return Math.max(0, Math.min(1, raw));
+}
 
 export function loadPrefs(): UserPrefs {
   try {
@@ -28,6 +37,7 @@ export function loadPrefs(): UserPrefs {
       lang: parsed.lang === "de" ? "de" : "en",
       highContrast: parsed.highContrast === true,
       muted: parsed.muted === true,
+      volume: clampVolume(parsed.volume),
       checkersShowNumbers: parsed.checkersShowNumbers === true,
     };
   } catch {
