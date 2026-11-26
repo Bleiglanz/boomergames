@@ -6,6 +6,8 @@ export interface UserPrefs {
   readonly highContrast: boolean;
   readonly muted: boolean;
   readonly volume: number;
+  readonly musicEnabled: boolean;
+  readonly musicTrack: number;
   readonly checkersShowNumbers: boolean;
 }
 
@@ -16,6 +18,8 @@ const DEFAULT_PREFS: UserPrefs = {
   highContrast: false,
   muted: false,
   volume: 0.75,
+  musicEnabled: false,
+  musicTrack: 0,
   checkersShowNumbers: false,
 };
 
@@ -38,6 +42,11 @@ export function loadPrefs(): UserPrefs {
       highContrast: parsed.highContrast === true,
       muted: parsed.muted === true,
       volume: clampVolume(parsed.volume),
+      musicEnabled: parsed.musicEnabled === true,
+      musicTrack:
+        typeof parsed.musicTrack === "number" && Number.isInteger(parsed.musicTrack) && parsed.musicTrack >= 0
+          ? parsed.musicTrack
+          : 0,
       checkersShowNumbers: parsed.checkersShowNumbers === true,
     };
   } catch {

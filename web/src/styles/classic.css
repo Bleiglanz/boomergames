@@ -607,9 +607,25 @@ body {
   font-size: 0.85rem;
   color: var(--text-muted);
   display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.footer-row {
+  display: flex;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.footer-credits {
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.footer-bar a {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 /* ===== Milestone 5: Browser-First + Mobile/Tablet-Ready Online Lounge ===== */

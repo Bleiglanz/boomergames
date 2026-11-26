@@ -29,6 +29,7 @@ const STRICT_CSP: &str = "default-src 'self'; \
     connect-src 'self' ws: wss: https://accounts.google.com; \
     frame-src https://accounts.google.com; \
     img-src 'self' data: https://lh3.googleusercontent.com; \
+    media-src 'self'; \
     frame-ancestors 'none'";
 
 /// Plain-text bilingual privacy policy served at `GET /privacy` (required for Google OAuth).
@@ -91,6 +92,7 @@ Boomergames ist ein 100 % kostenloses, nicht-kommerzielles Dame- und
 pub fn build_router(state: AppState) -> Router {
     let static_root = PathBuf::from(&state.config.static_dir);
     let assets_dir = static_root.join("assets");
+    let audio_dir = static_root.join("audio");
     let index_file = static_root.join("index.html");
 
     // Hashed assets under `/assets/*` are cached immutably for 1 year (§9.4).
@@ -99,6 +101,14 @@ pub fn build_router(state: AppState) -> Router {
         .layer(SetResponseHeaderLayer::overriding(
             CACHE_CONTROL,
             HeaderValue::from_static("public, max-age=31536000, immutable"),
+        ));
+
+    // Static CC-BY lounge jazz MP3s under `/audio/*` cached for 30 days.
+    let audio_service = Router::new()
+        .nest_service("/audio", ServeDir::new(audio_dir))
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=2592000"),
         ));
 
     // SPA fallback (`index.html` is `no-cache`).
@@ -111,6 +121,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/privacy", get(privacy_handler))
         .route("/ws", get(ws_upgrade_handler))
         .merge(assets_service)
+        .merge(audio_service)
         .fallback_service(spa_service)
         .layer(SetResponseHeaderLayer::if_not_present(
             CACHE_CONTROL,

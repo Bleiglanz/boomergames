@@ -7,6 +7,12 @@ export interface Strings {
   readonly soundOn: string;
   readonly soundOff: string;
   readonly soundVolume: string;
+  readonly musicOn: string;
+  readonly musicOff: string;
+  readonly musicNextTrack: string;
+  readonly musicCreditsPrefix: string;
+  readonly musicLicensePrefix: string;
+  readonly musicModifiedNote: string;
   readonly skipToContent: string;
   readonly landscapeHint: string;
   readonly poolKeysHint: string;
@@ -194,6 +200,12 @@ const EN: Strings = {
   soundOn: "Sound: On",
   soundOff: "Sound: Off",
   soundVolume: "Sound Volume",
+  musicOn: "♫ Jazz: On",
+  musicOff: "♫ Jazz: Off",
+  musicNextTrack: "Next jazz track",
+  musicCreditsPrefix: "Music:",
+  musicLicensePrefix: "Licensed under",
+  musicModifiedNote: "(re-encoded to 96 kbps MP3)",
   skipToContent: "Skip to main content",
   landscapeHint: "Tip: Rotate your phone to landscape for a wider pool table.",
   poolKeysHint: "Keys: ←/→ aim (Shift = fine), ↑/↓ power, Space = shoot, Esc = cancel.",
@@ -380,6 +392,12 @@ const DE: Strings = {
   soundOn: "Ton: An",
   soundOff: "Ton: Aus",
   soundVolume: "Lautstärke",
+  musicOn: "♫ Jazz: An",
+  musicOff: "♫ Jazz: Aus",
+  musicNextTrack: "Nächster Jazz-Titel",
+  musicCreditsPrefix: "Musik:",
+  musicLicensePrefix: "Lizenziert unter",
+  musicModifiedNote: "(neu codiert als 96 kbps MP3)",
   skipToContent: "Zum Hauptinhalt springen",
   landscapeHint: "Tipp: Querformat bietet auf Smartphones einen breiteren Billardtisch.",
   poolKeysHint: "Tasten: ←/→ zielen (Shift = fein), ↑/↓ Stärke, Leertaste = Stoß, Esc = Abbruch.",

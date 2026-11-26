@@ -1,5 +1,6 @@
 import "./styles/classic.css";
 
+import { JAZZ_TRACKS, MusicPlayer } from "./audio/music.js";
 import { SoundSynth } from "./audio/synth.js";
 import { getStrings, type Strings } from "./i18n/strings.js";
 import {
@@ -275,6 +276,7 @@ async function bootstrap(): Promise<void> {
   const bridge = await WasmBridge.create();
   let prefs: UserPrefs = loadPrefs();
   const synth = new SoundSynth(prefs.muted, prefs.volume);
+  const music = new MusicPlayer(prefs.musicEnabled, prefs.muted, prefs.volume, prefs.musicTrack);
 
   // Hydrate persisted zero-cookie localStorage preferences into WASM before first render.
   if (prefs.lang !== "en") {
@@ -494,10 +496,16 @@ async function bootstrap(): Promise<void> {
       highContrast: vm.highContrast,
       muted: synth.isMuted(),
       volume: synth.getVolume(),
+      musicEnabled: music.isEnabled(),
+      musicTrack: music.currentTrackIndex(),
       checkersShowNumbers: showNums,
     };
     savePrefs(prefs);
   };
+
+  music.subscribe(() => {
+    persistFromVm(activeBridge().viewModel());
+  });
 
   const announce = (text: string): void => {
     if (liveRegion !== null && text !== "" && text !== lastAnnouncement) {
@@ -508,6 +516,7 @@ async function bootstrap(): Promise<void> {
 
   const dispatchAndRender = (input: UiInput): void => {
     synth.unlock();
+    music.unlock();
     const isSharedPref =
       input.kind === "toggle_high_contrast" ||
       input.kind === "set_language" ||
@@ -666,12 +675,15 @@ async function bootstrap(): Promise<void> {
       synth.isMuted() ? s.soundOff : s.soundOn,
       () => {
         synth.setMuted(!synth.isMuted());
+        music.setMuted(synth.isMuted());
         if (!synth.isMuted()) {
           if (synth.getVolume() <= 0.01) {
             synth.setVolume(0.75);
+            music.setVolume(0.75);
             volRange.value = "75";
           }
           synth.unlock();
+          music.unlock();
         }
         soundBtn.textContent = synth.isMuted() ? s.soundOff : s.soundOn;
         soundBtn.className = synth.isMuted() ? "classic-btn" : "classic-btn active-toggle";
@@ -694,20 +706,64 @@ async function bootstrap(): Promise<void> {
     volRange.addEventListener("input", () => {
       const nextVol = Number(volRange.value) / 100;
       synth.setVolume(nextVol);
+      music.setVolume(nextVol);
       const shouldMute = nextVol <= 0.001;
       if (synth.isMuted() !== shouldMute) {
         synth.setMuted(shouldMute);
+        music.setMuted(shouldMute);
         soundBtn.textContent = synth.isMuted() ? s.soundOff : s.soundOn;
         soundBtn.className = synth.isMuted() ? "classic-btn" : "classic-btn active-toggle";
         soundBtn.setAttribute("aria-pressed", String(!synth.isMuted()));
       }
       if (!shouldMute) {
         synth.unlock();
+        music.unlock();
       }
       volRange.title = `${s.soundVolume}: ${volRange.value}%`;
       persistFromVm(activeBridge().viewModel());
     });
     soundWrap.append(soundBtn, volRange);
+
+    const musicWrap = document.createElement("div");
+    musicWrap.className = "sound-control-group";
+    const syncMusicButtons = (): void => {
+      const on = music.isEnabled();
+      const track = music.currentTrack();
+      musicBtn.textContent = on ? s.musicOn : s.musicOff;
+      musicBtn.className = on ? "classic-btn active-toggle" : "classic-btn";
+      musicBtn.setAttribute("aria-pressed", String(on));
+      musicBtn.title = `${track.title} — Kevin MacLeod`;
+      nextTrackBtn.style.display = on ? "inline-block" : "none";
+      nextTrackBtn.title = `${s.musicNextTrack} (${track.title})`;
+    };
+    const musicBtn = makeButton(
+      music.isEnabled() ? s.musicOn : s.musicOff,
+      () => {
+        const nextOn = !music.isEnabled();
+        if (nextOn && synth.isMuted()) {
+          synth.setMuted(false);
+          music.setMuted(false);
+          if (synth.getVolume() <= 0.01) {
+            synth.setVolume(0.75);
+            music.setVolume(0.75);
+            volRange.value = "75";
+          }
+          soundBtn.textContent = s.soundOn;
+          soundBtn.className = "classic-btn active-toggle";
+          soundBtn.setAttribute("aria-pressed", "true");
+        }
+        music.setEnabled(nextOn);
+        syncMusicButtons();
+      },
+      { active: music.isEnabled() },
+    );
+    const nextTrackBtn = makeButton("⏭", () => {
+      music.nextTrack();
+      syncMusicButtons();
+    });
+    nextTrackBtn.setAttribute("aria-label", s.musicNextTrack);
+    syncMusicButtons();
+    musicWrap.append(musicBtn, nextTrackBtn);
 
     const contrastBtn = makeButton(
       s.highContrast,
@@ -719,6 +775,7 @@ async function bootstrap(): Promise<void> {
 
     controls.append(
       soundWrap,
+      musicWrap,
       contrastBtn,
       makeButton(vm.lang === "en" ? "Deutsch" : "English", () =>
         dispatchAndRender({ kind: "set_language", lang: vm.lang === "en" ? "de" : "en" }),
@@ -915,9 +972,12 @@ async function bootstrap(): Promise<void> {
       );
     }
 
-    // Footer
+    // Footer (always includes full CC-BY 4.0 music attribution with hyperlinks)
     const footer = document.createElement("footer");
     footer.className = "footer-bar";
+
+    const footerMainRow = document.createElement("div");
+    footerMainRow.className = "footer-row";
     const footerText = document.createElement("span");
     footerText.textContent = s.footerNote;
     const privacyAnchor = document.createElement("a");
@@ -925,11 +985,49 @@ async function bootstrap(): Promise<void> {
     privacyAnchor.target = "_blank";
     privacyAnchor.rel = "noopener";
     privacyAnchor.textContent = s.privacyLink;
-    footer.append(footerText, privacyAnchor);
+    footerMainRow.append(footerText, privacyAnchor);
+
+    const makeExternalLink = (href: string, label: string): HTMLAnchorElement => {
+      const a = document.createElement("a");
+      a.href = href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = label;
+      return a;
+    };
+
+    const creditsRow = document.createElement("div");
+    creditsRow.className = "footer-credits";
+    creditsRow.append(document.createTextNode(`${s.musicCreditsPrefix} `));
+    JAZZ_TRACKS.forEach((track, idx) => {
+      if (idx > 0) {
+        creditsRow.append(document.createTextNode(", "));
+      }
+      creditsRow.append(makeExternalLink(track.sourceUrl, `"${track.title}"`));
+    });
+    creditsRow.append(
+      document.createTextNode(" — Kevin MacLeod ("),
+      makeExternalLink("https://incompetech.com/", "incompetech.com"),
+      document.createTextNode(`) · ${s.musicLicensePrefix} `),
+      makeExternalLink(
+        "https://creativecommons.org/licenses/by/4.0/",
+        "Creative Commons: By Attribution 4.0 License",
+      ),
+      document.createTextNode(` ${s.musicModifiedNote}`),
+    );
+
+    footer.append(footerMainRow, creditsRow);
     root.append(footer);
   };
 
   renderApp();
+
+  // Unlock persisted jazz music seamlessly on first user gesture if user previously enabled it.
+  const unlockOnce = (): void => {
+    music.unlock();
+  };
+  window.addEventListener("pointerdown", unlockOnce, { once: true });
+  window.addEventListener("keydown", unlockOnce, { once: true });
 
   window.addEventListener("resize", () => {
     if (mountedShell !== null) {
