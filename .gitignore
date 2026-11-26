@@ -4,3 +4,8 @@
 /web/src/wasm/
 *.log
 .DS_Store
+.env
+.env.*
+*.pem
+*.key
+continue.md
