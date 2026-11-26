@@ -2,6 +2,7 @@ import "./styles/classic.css";
 
 import { JAZZ_TRACKS, MusicPlayer } from "./audio/music.js";
 import { SoundSynth } from "./audio/synth.js";
+import { StockfishEngine } from "./chess/stockfish_engine.js";
 import { getStrings, type Strings } from "./i18n/strings.js";
 import {
   OnlineSession,
@@ -20,6 +21,9 @@ import {
   type CheckersOutcomeDto,
   type CheckersSettingsDto,
   type CheckersView,
+  type ChessColorDto,
+  type ChessOutcomeDto,
+  type ChessView,
   type GameBridge,
   type GameKindDto,
   type LocalModeDto,
@@ -52,13 +56,23 @@ const BALL_CHIP_COLORS: readonly string[] = [
   "#7b1e1e",
 ];
 
-function formatMode(mode: LocalModeDto, s: Strings): string {
+function formatMode(mode: LocalModeDto, s: Strings, game?: GameKindDto): string {
   switch (mode.kind) {
     case "hotseat":
       return s.hotseat;
     case "free_practice":
       return s.freePractice;
     case "vs_bot":
+      if (game === "chess") {
+        switch (mode.level) {
+          case "easy":
+            return s.chessBotEasy;
+          case "medium":
+            return s.chessBotMedium;
+          case "hard":
+            return s.chessBotHard;
+        }
+      }
       switch (mode.level) {
         case "easy":
           return s.botEasy;
@@ -95,6 +109,7 @@ function formatSeatName(
   mode: LocalModeDto,
   s: Strings,
   onlineTable: TableSnapshotDto | null = null,
+  game?: GameKindDto,
 ): string {
   if (onlineTable !== null) {
     const occ = onlineTable.seats[seatIndex];
@@ -106,11 +121,79 @@ function formatSeatName(
   if (seatIndex === 0) {
     return s.player1;
   }
-  return mode.kind === "vs_bot" ? `${s.computer} (${mode.level})` : s.player2;
+  if (mode.kind === "vs_bot") {
+    const engineLabel = game === "chess" ? "Stockfish" : s.computer;
+    return `${engineLabel} (${mode.level})`;
+  }
+  return s.player2;
 }
 
 function formatColorName(color: CheckersColorDto, s: Strings): string {
   return color === "black" ? s.colorBlack : s.colorWhite;
+}
+
+function formatChessColorName(color: ChessColorDto, s: Strings): string {
+  return color === "white" ? s.chessColorWhite : s.chessColorBlack;
+}
+
+const CHESS_GLYPHS: Readonly<Record<string, string>> = {
+  Q: "♕",
+  R: "♖",
+  B: "♗",
+  N: "♘",
+  P: "♙",
+  q: "♛",
+  r: "♜",
+  b: "♝",
+  n: "♞",
+  p: "♟",
+};
+
+const CHESS_SORT_RANK: Readonly<Record<string, number>> = {
+  q: 0,
+  r: 1,
+  b: 2,
+  n: 3,
+  p: 4,
+};
+
+function formatCapturedChessPieces(pieces: readonly string[]): string {
+  return [...pieces]
+    .sort((a, b) => (CHESS_SORT_RANK[a.toLowerCase()] ?? 9) - (CHESS_SORT_RANK[b.toLowerCase()] ?? 9))
+    .map((p) => CHESS_GLYPHS[p] ?? p)
+    .join("");
+}
+
+function formatChessOutcome(
+  outcome: ChessOutcomeDto,
+  mode: LocalModeDto,
+  s: Strings,
+  onlineTable: TableSnapshotDto | null = null,
+): string {
+  if (outcome.kind === "win") {
+    const winnerSeatIdx: 0 | 1 = outcome.winner_seat === "1" ? 0 : 1;
+    const winnerLabel = `${formatSeatName(winnerSeatIdx, mode, s, onlineTable, "chess")} (${formatChessColorName(outcome.winner, s)})`;
+    switch (outcome.reason) {
+      case "checkmate":
+        return `${winnerLabel} ${s.chessWinCheckmate}`;
+      case "resign":
+        return `${winnerLabel} ${s.outcomeWinResign}`;
+      case "timeout":
+        return `${winnerLabel} ${s.outcomeWinTimeout}`;
+    }
+  }
+  switch (outcome.reason) {
+    case "stalemate":
+      return s.chessDrawStalemate;
+    case "agreement":
+      return s.outcomeDrawAgreement;
+    case "threefold_repetition":
+      return s.outcomeDrawRepetition;
+    case "fifty_move_rule":
+      return s.chessDrawFiftyMove;
+    case "insufficient_material":
+      return s.chessDrawInsufficient;
+  }
 }
 
 function formatCheckersOutcome(
@@ -277,6 +360,8 @@ async function bootstrap(): Promise<void> {
   let prefs: UserPrefs = loadPrefs();
   const synth = new SoundSynth(prefs.muted, prefs.volume);
   const music = new MusicPlayer(prefs.musicEnabled, prefs.muted, prefs.volume, prefs.musicTrack);
+  const stockfish = new StockfishEngine();
+  let stockfishRequestKey = "";
 
   // Hydrate persisted zero-cookie localStorage preferences into WASM before first render.
   if (prefs.lang !== "en") {
@@ -287,6 +372,9 @@ async function bootstrap(): Promise<void> {
   }
   if (prefs.checkersShowNumbers) {
     bridge.dispatch({ kind: "checkers_toggle_square_numbers" });
+  }
+  if (!prefs.chessShowCoords) {
+    bridge.dispatch({ kind: "chess_toggle_coords" });
   }
   // Discard any bootstrap cues before first interaction.
   bridge.drainSoundCues();
@@ -308,7 +396,7 @@ async function bootstrap(): Promise<void> {
 
   const setCheckersFullscreen = (enabled: boolean): void => {
     const shell = mountedShell;
-    if (shell === null || shell.game !== "checkers") {
+    if (shell === null || (shell.game !== "checkers" && shell.game !== "chess")) {
       checkersFullscreen = false;
       return;
     }
@@ -440,6 +528,9 @@ async function bootstrap(): Promise<void> {
       if (prefs.checkersShowNumbers) {
         remoteBridge.dispatch({ kind: "checkers_toggle_square_numbers" });
       }
+      if (!prefs.chessShowCoords) {
+        remoteBridge.dispatch({ kind: "chess_toggle_coords" });
+      }
       if (onlineSession.latestGameFrameJson !== null) {
         remoteBridge.pushServerMessage(onlineSession.latestGameFrameJson);
       }
@@ -491,6 +582,10 @@ async function bootstrap(): Promise<void> {
       vm.screen.kind === "game_shell" && vm.screen.checkers !== null
         ? vm.screen.checkers.showSquareNumbers
         : prefs.checkersShowNumbers;
+    const showCoords =
+      vm.screen.kind === "game_shell" && vm.screen.chess !== null
+        ? vm.screen.chess.showCoords
+        : prefs.chessShowCoords;
     prefs = {
       lang: vm.lang === "de" ? "de" : "en",
       highContrast: vm.highContrast,
@@ -499,6 +594,7 @@ async function bootstrap(): Promise<void> {
       musicEnabled: music.isEnabled(),
       musicTrack: music.currentTrackIndex(),
       checkersShowNumbers: showNums,
+      chessShowCoords: showCoords,
     };
     savePrefs(prefs);
   };
@@ -520,7 +616,8 @@ async function bootstrap(): Promise<void> {
     const isSharedPref =
       input.kind === "toggle_high_contrast" ||
       input.kind === "set_language" ||
-      input.kind === "checkers_toggle_square_numbers";
+      input.kind === "checkers_toggle_square_numbers" ||
+      input.kind === "chess_toggle_coords";
 
     let changed = false;
     if (remoteBridge !== null) {
@@ -561,12 +658,40 @@ async function bootstrap(): Promise<void> {
     }
   };
 
+  const syncStockfish = (vm: ViewModel): void => {
+    if (
+      vm.remoteRole === "offline" &&
+      vm.screen.kind === "game_shell" &&
+      vm.screen.game === "chess" &&
+      vm.screen.chess !== null &&
+      vm.screen.mode.kind === "vs_bot" &&
+      vm.screen.chess.state.outcome === null &&
+      vm.screen.chess.state.botThinking
+    ) {
+      const fen = vm.screen.chess.state.fen;
+      const level = vm.screen.mode.level;
+      const key = `${vm.screen.chess.state.turnNumber}:${fen}:${level}`;
+      if (key !== stockfishRequestKey) {
+        stockfishRequestKey = key;
+        stockfish.requestMove(fen, level, (uci) => {
+          dispatchAndRender({ kind: "chess_apply_bot_move", uci });
+        });
+      }
+      return;
+    }
+    if (stockfishRequestKey !== "") {
+      stockfishRequestKey = "";
+      stockfish.cancel();
+    }
+  };
+
   const renderApp = (): void => {
     const onlineMatch = currentOnlineMatch();
     const vm: ViewModel =
       onlineMatch !== null && remoteBridge !== null
         ? remoteBridge.viewModel()
         : bridge.viewModel();
+    syncStockfish(vm);
     const s = getStrings(vm.lang);
     document.documentElement.lang = vm.lang;
     document.documentElement.dataset.contrast = vm.highContrast ? "high" : "standard";
@@ -823,7 +948,7 @@ async function bootstrap(): Promise<void> {
 
       const frame = document.createElement("div");
       frame.className =
-        vm.screen.game === "checkers" ? "canvas-frame checkers-aspect" : "canvas-frame";
+        vm.screen.game === "pool" ? "canvas-frame" : "canvas-frame checkers-aspect";
 
       const sidePanelHost = document.createElement("aside");
       sidePanelHost.className = "side-panel";
@@ -929,6 +1054,13 @@ async function bootstrap(): Promise<void> {
             dispatchAndRender({ kind: "checkers_drag_move", from, to }),
           onClearSelection: () => dispatchAndRender({ kind: "checkers_clear_selection" }),
         },
+        chess: {
+          onSelectSquare: (square) =>
+            dispatchAndRender({ kind: "chess_select_square", square }),
+          onDragMove: (from, to) =>
+            dispatchAndRender({ kind: "chess_drag_move", from, to }),
+          onClearSelection: () => dispatchAndRender({ kind: "chess_clear_selection" }),
+        },
         pool: {
           onAim: (angle) => dispatchAndRender({ kind: "pool_set_aim", angle }),
           onPower: (power) => dispatchAndRender({ kind: "pool_set_power", power }),
@@ -1013,7 +1145,13 @@ async function bootstrap(): Promise<void> {
         "https://creativecommons.org/licenses/by/4.0/",
         "Creative Commons: By Attribution 4.0 License",
       ),
-      document.createTextNode(` ${s.musicModifiedNote}`),
+      document.createTextNode(` ${s.musicModifiedNote} · ${s.chessEngineCreditsPrefix} `),
+      makeExternalLink("https://stockfishchess.org/", "Stockfish 19"),
+      document.createTextNode(" ("),
+      makeExternalLink("https://github.com/nmrugg/stockfish.js", "nmrugg/stockfish.js"),
+      document.createTextNode(", "),
+      makeExternalLink("https://www.gnu.org/licenses/gpl-3.0.html", "GPL-3.0"),
+      document.createTextNode(")"),
     );
 
     footer.append(footerMainRow, creditsRow);
@@ -1044,7 +1182,7 @@ async function bootstrap(): Promise<void> {
       target instanceof HTMLTextAreaElement ||
       (target instanceof HTMLInputElement && target.type !== "range");
 
-    if (mountedShell?.game === "checkers") {
+    if (mountedShell?.game === "checkers" || mountedShell?.game === "chess") {
       if (isNativeControl || target instanceof HTMLInputElement) {
         return;
       }
@@ -1575,7 +1713,8 @@ function updateGameShellInPlace(
     err.className = "error-banner";
     err.setAttribute("role", "alert");
     err.textContent =
-      vm.lastError === "not_allowed" && vm.screen.game === "checkers"
+      vm.lastError === "not_allowed" &&
+      (vm.screen.game === "checkers" || vm.screen.game === "chess")
         ? s.drawDeclinedError
         : `Error: ${vm.lastError}`;
     shell.bannerHost.append(err);
@@ -1585,6 +1724,24 @@ function updateGameShellInPlace(
     const view = vm.screen.checkers;
     shell.stage.syncCheckers(view);
     renderCheckersHud(
+      shell,
+      vm,
+      view,
+      vm.screen.mode,
+      s,
+      dispatch,
+      announce,
+      onlineTable,
+      checkersFullscreen,
+      onToggleCheckersFullscreen,
+    );
+    return;
+  }
+
+  if (vm.screen.game === "chess" && vm.screen.chess !== null) {
+    const view = vm.screen.chess;
+    shell.stage.syncChess(view);
+    renderChessHud(
       shell,
       vm,
       view,
@@ -2058,6 +2215,271 @@ function renderCheckersHud(
   shell.sideControlsHost.append(movesHeading, moveList, keysHint);
 }
 
+function renderChessHud(
+  shell: MountedShell,
+  vm: ViewModel,
+  view: ChessView,
+  mode: LocalModeDto,
+  s: Strings,
+  dispatch: (input: UiInput) => void,
+  announce: (text: string) => void,
+  onlineTable: TableSnapshotDto | null,
+  boardFullscreen: boolean,
+  onToggleBoardFullscreen: () => void,
+): void {
+  const st = view.state;
+  const isOnline = onlineTable !== null;
+  const isSpectator = vm.remoteRole === "spectator";
+  const mySeat: SeatDto | null =
+    vm.remoteRole === "seat1" ? "1" : vm.remoteRole === "seat2" ? "2" : null;
+  const mySeatIdx: 0 | 1 | null = mySeat === "1" ? 0 : mySeat === "2" ? 1 : null;
+  const myRematchReady = isOnline && mySeatIdx !== null && onlineTable.ready[mySeatIdx] === true;
+  const canAct = canActForSeat(vm.remoteRole, st.activeSeat);
+
+  if (st.outcome !== null) {
+    const outcomeText = formatChessOutcome(st.outcome, mode, s, onlineTable);
+    announce(outcomeText);
+    const banner = document.createElement("div");
+    banner.className = "notice-banner";
+    banner.setAttribute("role", "status");
+    const msg = document.createElement("span");
+    msg.textContent = myRematchReady ? `${outcomeText} · ${s.rematchWaiting}` : outcomeText;
+    banner.append(msg);
+    if (!isSpectator) {
+      banner.append(
+        makeButton(s.rematch, () => dispatch({ kind: "rematch" }), {
+          primary: !myRematchReady,
+          disabled: myRematchReady,
+        }),
+      );
+    }
+    shell.bannerHost.append(banner);
+  } else if (view.pendingPromotion !== null && canAct) {
+    announce(s.chessPromotePrompt);
+    const banner = document.createElement("div");
+    banner.className = "notice-banner";
+    banner.setAttribute("role", "status");
+    const msg = document.createElement("span");
+    msg.textContent = s.chessPromotePrompt;
+    const actions = document.createElement("div");
+    actions.className = "control-row";
+    actions.append(
+      makeButton(s.chessPromoteQueen, () => dispatch({ kind: "chess_promote", piece: "q" }), {
+        primary: true,
+      }),
+      makeButton(s.chessPromoteRook, () => dispatch({ kind: "chess_promote", piece: "r" })),
+      makeButton(s.chessPromoteBishop, () => dispatch({ kind: "chess_promote", piece: "b" })),
+      makeButton(s.chessPromoteKnight, () => dispatch({ kind: "chess_promote", piece: "n" })),
+      makeButton(s.loungeCancel, () => dispatch({ kind: "chess_clear_selection" })),
+    );
+    banner.append(msg, actions);
+    shell.bannerHost.append(banner);
+  } else if (st.drawOfferedBy !== null) {
+    if (isOnline && mySeat !== null && st.drawOfferedBy === mySeat) {
+      const banner = document.createElement("div");
+      banner.className = "notice-banner";
+      banner.textContent = s.drawOfferSent;
+      shell.bannerHost.append(banner);
+    } else if (!isSpectator) {
+      announce(s.drawOfferedPrompt);
+      const banner = document.createElement("div");
+      banner.className = "notice-banner";
+      banner.setAttribute("role", "status");
+      const msg = document.createElement("span");
+      msg.textContent = s.drawOfferedPrompt;
+      const actions = document.createElement("div");
+      actions.className = "control-row";
+      actions.append(
+        makeButton(s.acceptDraw, () => dispatch({ kind: "answer_draw", accept: true }), {
+          primary: true,
+        }),
+        makeButton(s.declineDraw, () => dispatch({ kind: "answer_draw", accept: false })),
+      );
+      banner.append(msg, actions);
+      shell.bannerHost.append(banner);
+    }
+  } else if (st.botThinking) {
+    const banner = document.createElement("div");
+    banner.className = "notice-banner";
+    banner.setAttribute("role", "status");
+    banner.textContent = isOnline ? s.botThinking : s.chessStockfishThinking;
+    shell.bannerHost.append(banner);
+  } else if (st.inCheck) {
+    announce(s.chessInCheck);
+    const banner = document.createElement("div");
+    banner.className = "error-banner";
+    banner.setAttribute("role", "alert");
+    banner.textContent = `${s.chessInCheck} (${formatChessColorName(st.turn, s)})`;
+    shell.bannerHost.append(banner);
+  } else if (isOnline) {
+    const banner = document.createElement("div");
+    banner.className = "notice-banner";
+    banner.textContent = isSpectator
+      ? s.spectatingBanner
+      : canAct
+        ? s.yourTurnBanner
+        : s.opponentTurnBanner;
+    shell.bannerHost.append(banner);
+  }
+
+  shell.playersHost.innerHTML = "";
+  const strip = document.createElement("div");
+  strip.className = "players-strip";
+  const seats: readonly [0, 1] = [0, 1];
+  for (const idx of seats) {
+    const seatDto = idx === 0 ? "1" : "2";
+    const color = st.seatColors[idx];
+    const isActive = st.outcome === null && st.activeSeat === seatDto;
+    const capturedPieces = color === "white" ? st.capturedByWhite : st.capturedByBlack;
+
+    const card = document.createElement("div");
+    card.className = isActive ? "player-card active" : "player-card";
+
+    const meta = document.createElement("div");
+    meta.className = "player-meta";
+
+    const disc = document.createElement("span");
+    disc.className = `disc-badge chess-${color}`;
+    disc.setAttribute("aria-hidden", "true");
+
+    const textWrap = document.createElement("div");
+    const nameEl = document.createElement("div");
+    nameEl.className = "player-name";
+    nameEl.textContent = `${isActive ? "▶ " : ""}${formatSeatName(idx, mode, s, onlineTable, "chess")} (${formatChessColorName(color, s)})`;
+    const subEl = document.createElement("div");
+    subEl.className = "player-sub captured-pieces";
+    subEl.textContent =
+      capturedPieces.length > 0 ? formatCapturedChessPieces(capturedPieces) : `${s.captured}: 0`;
+    textWrap.append(nameEl, subEl);
+    meta.append(disc, textWrap);
+    card.append(meta);
+
+    if (st.settings.clockMode !== "unlimited") {
+      const clock = document.createElement("div");
+      const ms =
+        st.settings.clockMode === "game"
+          ? st.clocksMs[idx]
+          : isActive
+            ? st.turnMsLeft
+            : st.settings.moveTimerSecs * 1000;
+      const urgent = isActive && ms <= 10_000;
+      clock.className = urgent ? "clock-readout urgent" : "clock-readout";
+      clock.textContent = formatClock(ms);
+      card.append(clock);
+    }
+
+    strip.append(card);
+  }
+  shell.playersHost.append(strip);
+
+  shell.sideControlsHost.innerHTML = "";
+  const heading = document.createElement("h2");
+  heading.textContent = s.chessTitle;
+
+  const modeBox = document.createElement("div");
+  modeBox.className = "status-box";
+  modeBox.textContent = isOnline
+    ? `${s.onlineMatch} #${onlineTable.no} · ${onlineTable.settings.rated ? s.loungeRated : s.loungeUnrated}`
+    : `${s.modeLabel}: ${formatMode(mode, s, "chess")}`;
+
+  const displayRow = document.createElement("div");
+  displayRow.className = "control-row";
+  displayRow.append(
+    makeButton(s.flipBoard, () => dispatch({ kind: "chess_flip_board" }), {
+      active: view.flipped,
+    }),
+    makeButton(s.chessShowCoords, () => dispatch({ kind: "chess_toggle_coords" }), {
+      active: view.showCoords,
+    }),
+    makeButton(
+      boardFullscreen ? s.poolExitFullscreenBtn : s.poolFullscreenBtn,
+      onToggleBoardFullscreen,
+      { active: boardFullscreen },
+    ),
+  );
+
+  shell.sideControlsHost.append(heading, modeBox);
+
+  if (!isOnline) {
+    const clockGroup = document.createElement("div");
+    clockGroup.className = "control-group";
+    const clockLabel = document.createElement("label");
+    clockLabel.htmlFor = "chess-clock-select";
+    clockLabel.textContent = s.clockPreset;
+    const select = document.createElement("select");
+    select.id = "chess-clock-select";
+    select.className = "classic-select";
+    const options: readonly [string, string][] = [
+      ["game:10", s.clockGame10],
+      ["game:5", s.clockGame5],
+      ["move:30", s.clockMove30],
+      ["unlimited", s.clockUnlimited],
+    ];
+    const currentKey = clockKeyFor(st.settings);
+    for (const [val, text] of options) {
+      const opt = document.createElement("option");
+      opt.value = val;
+      opt.textContent = text;
+      opt.selected = val === currentKey;
+      select.append(opt);
+    }
+    select.addEventListener("change", () => {
+      dispatch({ kind: "chess_set_clock", settings: settingsForClockKey(select.value) });
+    });
+    clockGroup.append(clockLabel, select);
+    shell.sideControlsHost.append(clockGroup);
+  }
+
+  shell.sideControlsHost.append(displayRow);
+
+  if (!isSpectator) {
+    const actionRow = document.createElement("div");
+    actionRow.className = "control-row";
+    const inProgress = st.outcome === null;
+    actionRow.append(
+      makeButton(s.offerDraw, () => dispatch({ kind: "offer_draw" }), {
+        disabled: !inProgress || st.drawOfferedBy !== null,
+      }),
+      makeButton(s.resign, () => dispatch({ kind: "resign" }), {
+        disabled: !inProgress,
+      }),
+      makeButton(s.rematch, () => dispatch({ kind: "rematch" }), {
+        primary: !inProgress && !myRematchReady,
+        disabled: isOnline && (inProgress || myRematchReady),
+      }),
+    );
+    shell.sideControlsHost.append(actionRow);
+  }
+
+  const movesHeading = document.createElement("h3");
+  movesHeading.textContent = s.moveListTitle;
+  const moveList = document.createElement("div");
+  moveList.className = "move-list";
+  if (st.moves.length === 0) {
+    moveList.textContent = s.chessNoMovesYet;
+  } else {
+    for (let i = 0; i < st.moves.length; i += 2) {
+      const row = document.createElement("div");
+      row.className = "move-row";
+      const num = document.createElement("span");
+      num.textContent = `${Math.floor(i / 2) + 1}.`;
+      const whiteMv = document.createElement("span");
+      whiteMv.textContent = st.moves[i] ?? "";
+      const blackMv = document.createElement("span");
+      blackMv.textContent = st.moves[i + 1] ?? "";
+      row.append(num, whiteMv, blackMv);
+      moveList.append(row);
+    }
+    moveList.scrollTop = moveList.scrollHeight;
+  }
+
+  const keysHint = document.createElement("p");
+  keysHint.className = "keys-hint";
+  keysHint.textContent = s.chessKeysHint;
+
+  shell.sideControlsHost.append(movesHeading, moveList, keysHint);
+}
+
 function renderHome(s: Strings, dispatch: (input: UiInput) => void): HTMLElement {
   const grid = document.createElement("div");
   grid.className = "home-grid";
@@ -2080,7 +2502,7 @@ function renderHome(s: Strings, dispatch: (input: UiInput) => void): HTMLElement
     modes.forEach((mode, index) => {
       btnRow.append(
         makeButton(
-          formatMode(mode, s),
+          formatMode(mode, s, game),
           () => dispatch({ kind: "start_local_game", game, mode }),
           { primary: index === 0 },
         ),
@@ -2091,6 +2513,14 @@ function renderHome(s: Strings, dispatch: (input: UiInput) => void): HTMLElement
     grid.append(card);
   };
 
+  addCard(s.poolTitle, s.poolDesc, "pool", [
+    { kind: "hotseat" },
+    { kind: "vs_bot", level: "easy" },
+    { kind: "vs_bot", level: "medium" },
+    { kind: "vs_bot", level: "hard" },
+    { kind: "free_practice" },
+  ]);
+
   addCard(s.checkersTitle, s.checkersDesc, "checkers", [
     { kind: "hotseat" },
     { kind: "vs_bot", level: "easy" },
@@ -2098,12 +2528,11 @@ function renderHome(s: Strings, dispatch: (input: UiInput) => void): HTMLElement
     { kind: "vs_bot", level: "hard" },
   ]);
 
-  addCard(s.poolTitle, s.poolDesc, "pool", [
+  addCard(s.chessTitle, s.chessDesc, "chess", [
     { kind: "hotseat" },
     { kind: "vs_bot", level: "easy" },
     { kind: "vs_bot", level: "medium" },
     { kind: "vs_bot", level: "hard" },
-    { kind: "free_practice" },
   ]);
 
   return grid;

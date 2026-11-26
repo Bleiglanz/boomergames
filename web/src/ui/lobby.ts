@@ -93,6 +93,16 @@ function loadGoogleIdentity(): Promise<GoogleAccountsIdApi | null> {
   return gsiLoadPromise;
 }
 
+function gameTitle(game: GameKindDto, s: Strings): string {
+  if (game === "pool") {
+    return s.poolTitle;
+  }
+  if (game === "chess") {
+    return s.chessTitle;
+  }
+  return s.checkersTitle;
+}
+
 function avatarGlyph(index: number): string {
   return AVATAR_BADGES[index % AVATAR_BADGES.length] ?? "🎱";
 }
@@ -226,7 +236,7 @@ export class LobbyController {
       toast.className = "notice-banner invite-toast";
       toast.setAttribute("role", "status");
       const msg = document.createElement("span");
-      msg.textContent = `${s.loungeInviteFrom} ${inv.from.name} (${inv.game === "pool" ? s.poolTitle : s.checkersTitle})`;
+      msg.textContent = `${s.loungeInviteFrom} ${inv.from.name} (${gameTitle(inv.game, s)})`;
       const actions = document.createElement("div");
       actions.className = "control-row";
       actions.append(
@@ -669,7 +679,7 @@ export class LobbyController {
     const titleRow = document.createElement("div");
     titleRow.className = "panel-heading-row";
     const h2 = document.createElement("h2");
-    h2.textContent = `${table.game === "pool" ? s.poolTitle : s.checkersTitle} · #${table.no} (${table.phase})`;
+    h2.textContent = `${gameTitle(table.game, s)} · #${table.no} (${table.phase})`;
     const topBtns = document.createElement("div");
     topBtns.className = "control-row";
     topBtns.append(
@@ -1133,6 +1143,14 @@ export class LobbyController {
         { active: this.highscoresGame === "checkers", small: true },
       ),
       makeBtn(
+        s.chessTitle,
+        () => {
+          this.highscoresGame = "chess";
+          this.session.fetchHighscores("chess", false);
+        },
+        { active: this.highscoresGame === "chess", small: true },
+      ),
+      makeBtn(
         s.loungeFindMe,
         () => this.session.fetchHighscores(this.highscoresGame, true),
         { small: true },
@@ -1208,14 +1226,14 @@ export class LobbyController {
       statsHeading.textContent = s.loungeProfileStats;
       const statsGrid = document.createElement("div");
       statsGrid.className = "profile-stats-grid";
-      const gameOrder: readonly GameKindDto[] = ["pool", "checkers"];
+      const gameOrder: readonly GameKindDto[] = ["pool", "checkers", "chess"];
       for (const gk of gameOrder) {
         const st = profile.stats.find((x) => x.game === gk);
         const card = document.createElement("div");
         card.className = "table-row-card profile-stat-card";
         const title = document.createElement("div");
         title.className = "table-row-title";
-        title.textContent = gk === "pool" ? s.poolTitle : s.checkersTitle;
+        title.textContent = gameTitle(gk, s);
         const val = document.createElement("div");
         val.className = "table-row-badges";
         if (st !== undefined) {
@@ -1238,7 +1256,7 @@ export class LobbyController {
         for (const m of profile.last) {
           const row = document.createElement("div");
           row.className = "move-row profile-match-row";
-          const gameLabel = m.game === "pool" ? "🎱" : "♟️";
+          const gameLabel = m.game === "pool" ? "🎱" : m.game === "chess" ? "♔" : "♟️";
           const resBadge = m.result === "win" ? "W" : m.result === "loss" ? "L" : "D";
           const dateStr = new Date(m.ts).toLocaleDateString();
           row.textContent = `${gameLabel} [${resBadge}] vs ${m.opp} · ${dateStr}`;

@@ -25,6 +25,7 @@ const STATUS_CACHE_TTL: Duration = Duration::from_secs(3);
 /// Strict Content-Security-Policy matching `incubation/plan.md` §9.4 (+ Google Identity Services).
 const STRICT_CSP: &str = "default-src 'self'; \
     script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com; \
+    worker-src 'self'; \
     style-src 'self' 'unsafe-inline' https://accounts.google.com; \
     connect-src 'self' ws: wss: https://accounts.google.com; \
     frame-src https://accounts.google.com; \
@@ -93,6 +94,7 @@ pub fn build_router(state: AppState) -> Router {
     let static_root = PathBuf::from(&state.config.static_dir);
     let assets_dir = static_root.join("assets");
     let audio_dir = static_root.join("audio");
+    let stockfish_dir = static_root.join("stockfish");
     let index_file = static_root.join("index.html");
 
     // Hashed assets under `/assets/*` are cached immutably for 1 year (§9.4).
@@ -111,6 +113,14 @@ pub fn build_router(state: AppState) -> Router {
             HeaderValue::from_static("public, max-age=2592000"),
         ));
 
+    // Stockfish 19 WASM Web Worker assets under `/stockfish/*` cached for 30 days.
+    let stockfish_service = Router::new()
+        .nest_service("/stockfish", ServeDir::new(stockfish_dir))
+        .layer(SetResponseHeaderLayer::overriding(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=2592000"),
+        ));
+
     // SPA fallback (`index.html` is `no-cache`).
     let spa_service = ServeDir::new(static_root).fallback(ServeFile::new(index_file));
 
@@ -122,6 +132,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws", get(ws_upgrade_handler))
         .merge(assets_service)
         .merge(audio_service)
+        .merge(stockfish_service)
         .fallback_service(spa_service)
         .layer(SetResponseHeaderLayer::if_not_present(
             CACHE_CONTROL,

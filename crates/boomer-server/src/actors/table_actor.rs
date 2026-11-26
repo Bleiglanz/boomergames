@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use boomer_domain::Seat;
 use boomer_domain::checkers::CheckersColor;
+use boomer_domain::chess::ChessColor;
 use boomer_domain::rating::is_provisional;
 use boomer_protocol::{
     BotLevelDto, ChatLineDto, ChatScopeDto, ErrorCode, GameKindDto, GameOverDto, KickReasonDto,
@@ -19,8 +20,8 @@ use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::actors::game_session::{
-    ActiveGame, BotDecision, BotWorkRequest, MatchFinishInfo, ServerCheckersMatch, ServerPoolMatch,
-    spawn_bot_turn,
+    ActiveGame, BotDecision, BotWorkRequest, MatchFinishInfo, ServerCheckersMatch,
+    ServerChessMatch, ServerPoolMatch, spawn_bot_turn,
 };
 use crate::actors::hub::LobbyHub;
 use crate::actors::lobby_actor::LobbyEvent;
@@ -232,6 +233,15 @@ pub enum TableCmd {
         turn: u32,
         /// Move square path (`1..=32`).
         path: Vec<u8>,
+    },
+    /// Authoritative Chess UCI move from a seated player.
+    ChessMove {
+        /// Acting user wire ID.
+        user_id: String,
+        /// Expected turn counter.
+        turn: u32,
+        /// Move in UCI coordinate notation (`e2e4`, `e7e8q`).
+        uci: String,
     },
     /// Authoritative Pool shot from a seated player.
     PoolShoot {
@@ -481,6 +491,9 @@ impl TableActor {
                 turn,
                 path,
             } => self.handle_checkers_move(&user_id, turn, &path),
+            TableCmd::ChessMove { user_id, turn, uci } => {
+                self.handle_chess_move(&user_id, turn, &uci);
+            }
             TableCmd::PoolShoot { user_id, shot } => self.handle_pool_shoot(&user_id, shot),
             TableCmd::PoolPlaceCue { user_id, x, y } => self.handle_pool_place_cue(&user_id, x, y),
             TableCmd::Resign { user_id } => self.handle_resign(&user_id),
@@ -868,6 +881,14 @@ impl TableActor {
                     seed,
                 )))
             }
+            GameKindDto::Chess => {
+                let colors = if swap {
+                    [ChessColor::Black, ChessColor::White]
+                } else {
+                    [ChessColor::White, ChessColor::Black]
+                };
+                ActiveGame::Chess(Box::new(ServerChessMatch::new(colors, &self.settings)))
+            }
         };
 
         let initial_snap = engine.snapshot_message(false);
@@ -903,6 +924,35 @@ impl TableActor {
         }
         let finish = match_state.finish_info();
         let snap = ServerMessage::CheckersSnapshot {
+            state: match_state.to_dto(false),
+        };
+        self.broadcast_table_msg(&snap);
+        if let Some(info) = finish {
+            self.on_game_finished(info);
+        } else {
+            self.maybe_schedule_bot_turn();
+        }
+    }
+
+    fn handle_chess_move(&mut self, user_id: &str, turn: u32, uci: &str) {
+        let Some(seat_idx) = self.find_human_seat(user_id) else {
+            self.send_error_to(user_id, ErrorCode::NotYourTurn, "chess.move");
+            return;
+        };
+        if self.phase != TablePhaseDto::Playing {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "chess.move");
+            return;
+        }
+        let Some(ActiveGame::Chess(match_state)) = self.active_game.as_mut() else {
+            self.send_error_to(user_id, ErrorCode::NotAllowed, "chess.move");
+            return;
+        };
+        if let Err(code) = match_state.apply_move(seat_idx, turn, uci) {
+            self.send_error_to(user_id, code, "chess.move");
+            return;
+        }
+        let finish = match_state.finish_info();
+        let snap = ServerMessage::ChessSnapshot {
             state: match_state.to_dto(false),
         };
         self.broadcast_table_msg(&snap);
@@ -1003,20 +1053,34 @@ impl TableActor {
             .get(1 - seat_idx)
             .is_some_and(|s| s.as_ref().is_some_and(SeatOccupant::is_bot));
         let seat = if seat_idx == 0 { Seat::One } else { Seat::Two };
-        let snap = {
-            let Some(ActiveGame::Checkers(match_state)) = self.active_game.as_mut() else {
+        let snap = match self.active_game.as_mut() {
+            Some(ActiveGame::Checkers(match_state)) => {
+                if let Err(code) = match_state.offer_draw(seat) {
+                    self.send_error_to(user_id, code, "draw.offer");
+                    return;
+                }
+                if opp_is_bot {
+                    let _ = match_state.answer_draw(seat.opponent(), false);
+                }
+                ServerMessage::CheckersSnapshot {
+                    state: match_state.to_dto(self.bot_thinking),
+                }
+            }
+            Some(ActiveGame::Chess(match_state)) => {
+                if let Err(code) = match_state.offer_draw(seat) {
+                    self.send_error_to(user_id, code, "draw.offer");
+                    return;
+                }
+                if opp_is_bot {
+                    let _ = match_state.answer_draw(seat.opponent(), false);
+                }
+                ServerMessage::ChessSnapshot {
+                    state: match_state.to_dto(self.bot_thinking),
+                }
+            }
+            _ => {
                 self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.offer");
                 return;
-            };
-            if let Err(code) = match_state.offer_draw(seat) {
-                self.send_error_to(user_id, code, "draw.offer");
-                return;
-            }
-            if opp_is_bot {
-                let _ = match_state.answer_draw(seat.opponent(), false);
-            }
-            ServerMessage::CheckersSnapshot {
-                state: match_state.to_dto(self.bot_thinking),
             }
         };
         if opp_is_bot {
@@ -1030,18 +1094,36 @@ impl TableActor {
             self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.answer");
             return;
         };
-        let Some(ActiveGame::Checkers(match_state)) = self.active_game.as_mut() else {
-            self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.answer");
-            return;
-        };
         let seat = if seat_idx == 0 { Seat::One } else { Seat::Two };
-        if let Err(code) = match_state.answer_draw(seat, accept) {
-            self.send_error_to(user_id, code, "draw.answer");
-            return;
-        }
-        let finish = match_state.finish_info();
-        let snap = ServerMessage::CheckersSnapshot {
-            state: match_state.to_dto(false),
+        let (finish, snap) = match self.active_game.as_mut() {
+            Some(ActiveGame::Checkers(match_state)) => {
+                if let Err(code) = match_state.answer_draw(seat, accept) {
+                    self.send_error_to(user_id, code, "draw.answer");
+                    return;
+                }
+                (
+                    match_state.finish_info(),
+                    ServerMessage::CheckersSnapshot {
+                        state: match_state.to_dto(false),
+                    },
+                )
+            }
+            Some(ActiveGame::Chess(match_state)) => {
+                if let Err(code) = match_state.answer_draw(seat, accept) {
+                    self.send_error_to(user_id, code, "draw.answer");
+                    return;
+                }
+                (
+                    match_state.finish_info(),
+                    ServerMessage::ChessSnapshot {
+                        state: match_state.to_dto(false),
+                    },
+                )
+            }
+            _ => {
+                self.send_error_to(user_id, ErrorCode::NotAllowed, "draw.answer");
+                return;
+            }
         };
         self.broadcast_table_msg(&snap);
         if let Some(info) = finish {
@@ -1108,6 +1190,11 @@ impl TableActor {
                 level,
                 seed,
             },
+            ActiveGame::Chess(m) => BotWorkRequest::Chess {
+                position: Box::new(m.game.position().clone()),
+                level,
+                seed,
+            },
         };
         spawn_bot_turn(self.hub.bot_semaphore(), self.self_tx.clone(), turn, req);
     }
@@ -1155,6 +1242,17 @@ impl TableActor {
                     shot: applied,
                     state: post_state,
                 });
+                info
+            }
+            (ActiveGame::Chess(m), BotDecision::ChessMove(uci)) => {
+                if m.apply_move(active_idx, turn, &uci).is_err() {
+                    return;
+                }
+                let snap = ServerMessage::ChessSnapshot {
+                    state: m.to_dto(false),
+                };
+                let info = m.finish_info();
+                self.broadcast_table_msg(&snap);
                 info
             }
             _ => return,

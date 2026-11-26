@@ -6,9 +6,9 @@ use boomer_domain::pool::constants::{
 };
 use boomer_domain::pool::{compute_aim_preview, simulate_shot};
 use boomer_protocol::{
-    CheckersSettingsDto, CheckersStateDto, ClientMessage, ErrorCode, GameKindDto, LocalModeDto,
-    PROTOCOL_VERSION, PoolSettingsDto, PoolShotDto, PoolStateDto, SeatDto, ServerMessage,
-    SessionKindDto,
+    CheckersSettingsDto, CheckersStateDto, ChessColorDto, ChessSettingsDto, ChessStateDto,
+    ClientMessage, ErrorCode, GameKindDto, LocalModeDto, PROTOCOL_VERSION, PoolSettingsDto,
+    PoolShotDto, PoolStateDto, SeatDto, ServerMessage, SessionKindDto,
 };
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +58,40 @@ pub enum UiInput {
     CheckersSetClock {
         /// Updated clock configuration.
         settings: CheckersSettingsDto,
+    },
+    /// Click or keyboard-select a Chess square (`0 = a1` .. `63 = h8`).
+    ChessSelectSquare {
+        /// Board square index (`0..64`).
+        square: u8,
+    },
+    /// Drag-and-drop a Chess piece from `from` to `to` (`0..64`).
+    ChessDragMove {
+        /// Origin square index (`0..64`).
+        from: u8,
+        /// Target square index (`0..64`).
+        to: u8,
+    },
+    /// Complete a pending pawn promotion (`"q"`, `"r"`, `"b"`, or `"n"`).
+    ChessPromote {
+        /// Promotion piece letter (`"q"`, `"r"`, `"b"`, or `"n"`).
+        piece: String,
+    },
+    /// Clear the active Chess square selection and any pending promotion picker.
+    ChessClearSelection,
+    /// Flip the Chess board perspective vertically.
+    ChessFlipBoard,
+    /// Toggle algebraic `a-h / 1-8` coordinate labels on the Chess board.
+    ChessToggleCoords,
+    /// Update Chess clock settings (starts a fresh game with the new clock).
+    ChessSetClock {
+        /// Updated clock configuration.
+        settings: ChessSettingsDto,
+    },
+    /// Apply a move chosen by the Stockfish Web Worker in offline single-player mode.
+    /// An empty `uci` string triggers the built-in Rust fallback AI.
+    ChessApplyBotMove {
+        /// UCI move string (e.g. `"e7e5"`, `"e7e8q"`), or `""` for fallback.
+        uci: String,
     },
     /// Update live Pool cue aim angle (radians).
     PoolSetAim {
@@ -137,6 +171,36 @@ pub struct CheckersView {
     pub show_square_numbers: bool,
 }
 
+/// Pending Chess pawn promotion awaiting user piece choice (`q`, `r`, `b`, or `n`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChessPendingPromotion {
+    /// Origin pawn square (`0..64`).
+    pub from: u8,
+    /// Destination promotion square (`0..64`).
+    pub to: u8,
+}
+
+/// Interactive Chess UI projection derived strictly in Rust.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChessView {
+    /// Authoritative game snapshot from the transport.
+    pub state: ChessStateDto,
+    /// Currently selected square (`0 = a1` .. `63 = h8`), if any.
+    pub selected_square: Option<u8>,
+    /// Squares (`0..64`) whose pieces may legally move this turn.
+    pub selectable_squares: Vec<u8>,
+    /// Legal destination squares (`0..64`) for `selected_square`.
+    pub highlighted_targets: Vec<u8>,
+    /// Pending pawn promotion choice, if user just moved a pawn onto the last rank.
+    pub pending_promotion: Option<ChessPendingPromotion>,
+    /// Whether the board is rendered flipped (Black at bottom, White at top).
+    pub flipped: bool,
+    /// Whether algebraic `a-h / 1-8` coordinates are overlaid on board edges.
+    pub show_coords: bool,
+}
+
 /// Aiming-aid geometry projected from `boomer-domain::pool::aim`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +269,8 @@ pub enum ScreenView {
         checkers: Option<Box<CheckersView>>,
         /// 8-Ball Pool interactive state when `game == Pool`.
         pool: Option<Box<PoolView>>,
+        /// Chess interactive state when `game == Chess`.
+        chess: Option<Box<ChessView>>,
     },
 }
 
@@ -243,6 +309,10 @@ pub struct ViewModel {
 }
 
 /// Transport-agnostic client state machine.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent per-game display toggles (flip/coords/numbers) and dirty flag"
+)]
 pub struct ClientApp<T: GameTransport> {
     transport: T,
     view: ViewModel,
@@ -251,6 +321,11 @@ pub struct ClientApp<T: GameTransport> {
     selected_path: Vec<u8>,
     checkers_flipped: bool,
     show_square_numbers: bool,
+    chess_state: Option<ChessStateDto>,
+    chess_selected_square: Option<u8>,
+    chess_pending_promotion: Option<ChessPendingPromotion>,
+    chess_flipped: bool,
+    chess_show_coords: bool,
     pool_state: Option<PoolStateDto>,
     pending_pool_state: Option<PoolStateDto>,
     pool_aim_angle: f64,
@@ -296,6 +371,11 @@ impl<T: GameTransport> ClientApp<T> {
             selected_path: Vec::new(),
             checkers_flipped: false,
             show_square_numbers: false,
+            chess_state: None,
+            chess_selected_square: None,
+            chess_pending_promotion: None,
+            chess_flipped: false,
+            chess_show_coords: true,
             pool_state: None,
             pending_pool_state: None,
             pool_aim_angle: 0.0,
@@ -316,9 +396,11 @@ impl<T: GameTransport> ClientApp<T> {
     pub fn enter_remote_game(&mut self, game: GameKindDto, role: RemoteRole) {
         self.reset_transient_ui();
         self.checkers_state = None;
+        self.chess_state = None;
         self.pool_state = None;
         self.pending_pool_state = None;
         self.checkers_flipped = matches!(role, RemoteRole::Seat2);
+        self.chess_flipped = matches!(role, RemoteRole::Seat2);
         self.view.session_kind = SessionKindDto::Remote;
         self.view.remote_role = role;
         self.view.screen = ScreenView::GameShell {
@@ -327,6 +409,7 @@ impl<T: GameTransport> ClientApp<T> {
             status: "online_match".to_owned(),
             checkers: None,
             pool: None,
+            chess: None,
         };
         self.dirty = true;
     }
@@ -371,6 +454,7 @@ impl<T: GameTransport> ClientApp<T> {
             UiInput::ReturnHome => {
                 self.reset_transient_ui();
                 self.checkers_state = None;
+                self.chess_state = None;
                 self.pool_state = None;
                 self.pending_pool_state = None;
                 self.send_checked(ClientMessage::LocalLeave {});
@@ -408,6 +492,14 @@ impl<T: GameTransport> ClientApp<T> {
                 self.selected_path.clear();
                 self.send_checked(ClientMessage::CheckersSettings { settings });
             }
+            UiInput::ChessSelectSquare { .. }
+            | UiInput::ChessDragMove { .. }
+            | UiInput::ChessPromote { .. }
+            | UiInput::ChessClearSelection
+            | UiInput::ChessFlipBoard
+            | UiInput::ChessToggleCoords
+            | UiInput::ChessSetClock { .. }
+            | UiInput::ChessApplyBotMove { .. } => self.handle_chess_ui_input(&input),
             UiInput::PoolSetAim { .. }
             | UiInput::PoolSetPower { .. }
             | UiInput::PoolSetSpin { .. }
@@ -484,6 +576,8 @@ impl<T: GameTransport> ClientApp<T> {
 
     fn reset_transient_ui(&mut self) {
         self.selected_path.clear();
+        self.chess_selected_square = None;
+        self.chess_pending_promotion = None;
         self.pool_cue_preview = None;
         self.pool_spin_x = 0.0;
         self.pool_spin_y = 0.0;
@@ -758,6 +852,189 @@ impl<T: GameTransport> ClientApp<T> {
         }
     }
 
+    fn handle_chess_ui_input(&mut self, input: &UiInput) {
+        match input {
+            UiInput::ChessSelectSquare { square } => self.handle_chess_select(*square),
+            UiInput::ChessDragMove { from, to } => self.handle_chess_drag(*from, *to),
+            UiInput::ChessPromote { piece } => self.handle_chess_promote(piece),
+            UiInput::ChessClearSelection => {
+                if self.chess_selected_square.is_some() || self.chess_pending_promotion.is_some() {
+                    self.chess_selected_square = None;
+                    self.chess_pending_promotion = None;
+                    self.sync_game_views();
+                }
+            }
+            UiInput::ChessFlipBoard => {
+                self.chess_flipped = !self.chess_flipped;
+                self.sync_game_views();
+            }
+            UiInput::ChessToggleCoords => {
+                self.chess_show_coords = !self.chess_show_coords;
+                self.sync_game_views();
+            }
+            UiInput::ChessSetClock { settings } => {
+                self.chess_selected_square = None;
+                self.chess_pending_promotion = None;
+                self.send_checked(ClientMessage::ChessSettings {
+                    settings: *settings,
+                });
+            }
+            UiInput::ChessApplyBotMove { uci } => self.handle_chess_apply_bot_move(uci),
+            _ => {}
+        }
+    }
+
+    fn handle_chess_select(&mut self, square: u8) {
+        let Some(state) = self.chess_state.clone() else {
+            return;
+        };
+        if state.outcome.is_some()
+            || state.bot_thinking
+            || !self.can_act_for_seat(state.active_seat)
+        {
+            return;
+        }
+        self.chess_pending_promotion = None;
+
+        if let Some(from) = self.chess_selected_square {
+            if from == square {
+                self.chess_selected_square = None;
+                self.sync_game_views();
+                return;
+            }
+            if self.try_submit_chess_move(&state, from, square) {
+                return;
+            }
+        }
+
+        let can_start = state.legal_moves.iter().any(|mv| mv.from == square);
+        if can_start {
+            self.chess_selected_square = Some(square);
+            self.sync_game_views();
+        } else if self.chess_selected_square.is_some() {
+            self.chess_selected_square = None;
+            self.sync_game_views();
+        }
+    }
+
+    fn handle_chess_drag(&mut self, from: u8, to: u8) {
+        let Some(state) = self.chess_state.clone() else {
+            return;
+        };
+        if state.outcome.is_some()
+            || state.bot_thinking
+            || !self.can_act_for_seat(state.active_seat)
+        {
+            return;
+        }
+        self.chess_pending_promotion = None;
+        if !self.try_submit_chess_move(&state, from, to) {
+            self.chess_selected_square = None;
+            self.sync_game_views();
+        }
+    }
+
+    fn try_submit_chess_move(&mut self, state: &ChessStateDto, from: u8, to: u8) -> bool {
+        let matching: Vec<&boomer_protocol::ChessMoveDto> = state
+            .legal_moves
+            .iter()
+            .filter(|mv| mv.from == from && mv.to == to)
+            .collect();
+        match matching.as_slice() {
+            [] => false,
+            [single] => {
+                let turn = state.turn_number;
+                let uci = single.uci.clone();
+                self.chess_selected_square = None;
+                self.chess_pending_promotion = None;
+                self.send_checked(ClientMessage::ChessMove { turn, uci });
+                true
+            }
+            _ => {
+                // Multiple legal moves between the same squares => pawn promotion choice (Q/R/B/N).
+                self.chess_selected_square = Some(from);
+                self.chess_pending_promotion = Some(ChessPendingPromotion { from, to });
+                self.sync_game_views();
+                true
+            }
+        }
+    }
+
+    fn handle_chess_promote(&mut self, piece: &str) {
+        let Some(state) = self.chess_state.clone() else {
+            return;
+        };
+        let Some(pending) = self.chess_pending_promotion else {
+            return;
+        };
+        let normalized = piece.to_ascii_lowercase();
+        let chosen = state.legal_moves.iter().find(|mv| {
+            mv.from == pending.from
+                && mv.to == pending.to
+                && mv.promotion.as_deref() == Some(normalized.as_str())
+        });
+        if let Some(mv) = chosen {
+            let turn = state.turn_number;
+            let uci = mv.uci.clone();
+            self.chess_selected_square = None;
+            self.chess_pending_promotion = None;
+            self.send_checked(ClientMessage::ChessMove { turn, uci });
+        } else {
+            self.chess_pending_promotion = None;
+            self.sync_game_views();
+        }
+    }
+
+    fn handle_chess_apply_bot_move(&mut self, uci: &str) {
+        if self.view.remote_role != RemoteRole::Offline {
+            return;
+        }
+        let Some(state) = self.chess_state.as_ref() else {
+            return;
+        };
+        if state.outcome.is_some() || !state.bot_thinking {
+            return;
+        }
+        let turn = state.turn_number;
+        self.send_checked(ClientMessage::ChessMove {
+            turn,
+            uci: uci.to_owned(),
+        });
+    }
+
+    fn build_chess_view(&self, state: &ChessStateDto) -> ChessView {
+        let can_act = !state.bot_thinking
+            && state.outcome.is_none()
+            && self.can_act_for_seat(state.active_seat);
+        let mut selectable = Vec::new();
+        if can_act {
+            for mv in &state.legal_moves {
+                if !selectable.contains(&mv.from) {
+                    selectable.push(mv.from);
+                }
+            }
+        }
+
+        let mut highlighted = Vec::new();
+        if can_act && let Some(from) = self.chess_selected_square {
+            for mv in &state.legal_moves {
+                if mv.from == from && !highlighted.contains(&mv.to) {
+                    highlighted.push(mv.to);
+                }
+            }
+        }
+
+        ChessView {
+            state: state.clone(),
+            selected_square: self.chess_selected_square,
+            selectable_squares: selectable,
+            highlighted_targets: highlighted,
+            pending_promotion: self.chess_pending_promotion,
+            flipped: self.chess_flipped,
+            show_coords: self.chess_show_coords,
+        }
+    }
+
     fn build_pool_view(&self, state: &PoolStateDto) -> PoolView {
         let animating = self.pool_anim.is_playing();
         let can_act = self.can_act_for_seat(state.active_seat);
@@ -807,9 +1084,20 @@ impl<T: GameTransport> ClientApp<T> {
             .pool_state
             .as_ref()
             .map(|st| Box::new(self.build_pool_view(st)));
-        if let ScreenView::GameShell { checkers, pool, .. } = &mut self.view.screen {
+        let chess_next = self
+            .chess_state
+            .as_ref()
+            .map(|st| Box::new(self.build_chess_view(st)));
+        if let ScreenView::GameShell {
+            checkers,
+            pool,
+            chess,
+            ..
+        } = &mut self.view.screen
+        {
             *checkers = checkers_next;
             *pool = pool_next;
+            *chess = chess_next;
             self.dirty = true;
         }
     }
@@ -837,24 +1125,38 @@ impl<T: GameTransport> ClientApp<T> {
                         } else {
                             None
                         };
+                        let chess = if game == GameKindDto::Chess {
+                            self.chess_state
+                                .as_ref()
+                                .map(|st| Box::new(self.build_chess_view(st)))
+                        } else {
+                            None
+                        };
                         ScreenView::GameShell {
                             game,
                             mode,
                             status,
                             checkers,
                             pool,
+                            chess,
                         }
                     } else {
                         self.checkers_state = None;
+                        self.chess_state = None;
                         self.pool_state = None;
                         self.pending_pool_state = None;
                         self.selected_path.clear();
+                        self.chess_selected_square = None;
+                        self.chess_pending_promotion = None;
                         ScreenView::Home
                     };
                     self.dirty = true;
                 }
                 ServerMessage::CheckersSnapshot { state } => {
                     self.handle_checkers_snapshot(state);
+                }
+                ServerMessage::ChessSnapshot { state } => {
+                    self.handle_chess_snapshot(state);
                 }
                 ServerMessage::PoolSnapshot { state } => {
                     self.handle_pool_snapshot(state);
@@ -974,6 +1276,50 @@ impl<T: GameTransport> ClientApp<T> {
             self.sound_cues.push(SoundCue::GameOver);
         }
         self.checkers_state = Some(state);
+        self.sync_game_views();
+    }
+
+    fn handle_chess_snapshot(&mut self, state: ChessStateDto) {
+        let prev_moves = self.chess_state.as_ref().map_or(0, |p| p.moves.len());
+        let prev_outcome = self.chess_state.as_ref().and_then(|p| p.outcome);
+        let is_fresh_match = state.turn_number == 1
+            && state.moves.is_empty()
+            && self
+                .chess_state
+                .as_ref()
+                .is_none_or(|prev| prev.turn_number != 1 || prev.seat_colors != state.seat_colors);
+        if is_fresh_match {
+            let [seat1_color, seat2_color] = state.seat_colors;
+            self.chess_flipped = match self.view.remote_role {
+                RemoteRole::Offline | RemoteRole::Seat1 => seat1_color == ChessColorDto::Black,
+                RemoteRole::Seat2 => seat2_color == ChessColorDto::Black,
+                RemoteRole::Spectator => false,
+            };
+        }
+        let turn_changed = self
+            .chess_state
+            .as_ref()
+            .is_none_or(|prev| prev.turn_number != state.turn_number);
+        if turn_changed {
+            self.chess_selected_square = None;
+            self.chess_pending_promotion = None;
+            self.last_warn_second = None;
+        }
+        if state.moves.len() > prev_moves
+            && let Some(last_san) = state.moves.last()
+        {
+            if last_san.contains('=') {
+                self.sound_cues.push(SoundCue::CheckerKing);
+            } else if last_san.contains('x') {
+                self.sound_cues.push(SoundCue::CheckerCapture);
+            } else {
+                self.sound_cues.push(SoundCue::CheckerMove);
+            }
+        }
+        if prev_outcome.is_none() && state.outcome.is_some() {
+            self.sound_cues.push(SoundCue::GameOver);
+        }
+        self.chess_state = Some(state);
         self.sync_game_views();
     }
 
@@ -1139,6 +1485,59 @@ mod tests {
         let mut app = ClientApp::new(LocalSessionAdapter::new());
         let changed = app.handle_input(UiInput::StartLocalGame {
             game: GameKindDto::Checkers,
+            mode: LocalModeDto::FreePractice,
+        });
+        assert!(changed);
+        assert_eq!(app.view_model().screen, ScreenView::Home);
+        assert_eq!(app.view_model().last_error, Some(ErrorCode::Invalid));
+    }
+
+    #[test]
+    fn chess_click_move_and_stockfish_bot_reply_via_uci() {
+        let mut app = ClientApp::new(LocalSessionAdapter::with_seed(42));
+        let _ = app.handle_input(UiInput::StartLocalGame {
+            game: GameKindDto::Chess,
+            mode: LocalModeDto::VsBot {
+                level: BotLevelDto::Medium,
+            },
+        });
+
+        // White plays e2 (12) -> e4 (28).
+        assert!(app.handle_input(UiInput::ChessSelectSquare { square: 12 }));
+        assert!(app.handle_input(UiInput::ChessSelectSquare { square: 28 }));
+
+        if let ScreenView::GameShell {
+            chess: Some(view), ..
+        } = &app.view_model().screen
+        {
+            assert!(view.state.bot_thinking);
+            assert_eq!(view.state.turn, ChessColorDto::Black);
+            assert_eq!(view.state.moves, vec!["e4".to_owned()]);
+        } else {
+            panic!("expected chess shell");
+        }
+
+        // Stockfish worker returns e7e5.
+        assert!(app.handle_input(UiInput::ChessApplyBotMove {
+            uci: "e7e5".to_owned(),
+        }));
+        if let ScreenView::GameShell {
+            chess: Some(view), ..
+        } = &app.view_model().screen
+        {
+            assert!(!view.state.bot_thinking);
+            assert_eq!(view.state.turn, ChessColorDto::White);
+            assert_eq!(view.state.moves, vec!["e4".to_owned(), "e5".to_owned()]);
+        } else {
+            panic!("expected chess shell");
+        }
+    }
+
+    #[test]
+    fn chess_rejects_free_practice_mode() {
+        let mut app = ClientApp::new(LocalSessionAdapter::new());
+        let changed = app.handle_input(UiInput::StartLocalGame {
+            game: GameKindDto::Chess,
             mode: LocalModeDto::FreePractice,
         });
         assert!(changed);

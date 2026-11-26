@@ -122,6 +122,7 @@ impl LobbyHub {
 
         hub.open_next_room(GameKindDto::Pool);
         hub.open_next_room(GameKindDto::Checkers);
+        hub.open_next_room(GameKindDto::Chess);
         hub
     }
 
@@ -212,6 +213,7 @@ impl LobbyHub {
         let (prefix, label) = match game {
             GameKindDto::Pool => ("pool-social", "8-Ball Pool · Social Lounge"),
             GameKindDto::Checkers => ("checkers-social", "Checkers · Social Lounge"),
+            GameKindDto::Chess => ("chess-social", "Chess · Social Lounge"),
         };
         let id = format!("{prefix}-{index}");
         let name = if index == 1 {

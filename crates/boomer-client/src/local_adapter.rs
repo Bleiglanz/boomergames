@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use boomer_domain::checkers::{CheckersColor, CheckersGame, CheckersSearch, SearchProgress};
+use boomer_domain::chess::{ChessColor, ChessGame, ChessSearch, ChessSquare};
 use boomer_domain::math::Vec2;
 use boomer_domain::pool::{
     PoolFoul, PoolGame, PoolSearch, PoolSearchProgress, PoolSettings, ShotInput,
@@ -10,12 +11,14 @@ use boomer_domain::pool::{
 use boomer_domain::rng::SplitMix64;
 use boomer_domain::{BotLevel, GameKind, LocalMode, Seat};
 use boomer_protocol::{
-    CheckersClockModeDto, CheckersSettingsDto, CheckersStateDto, ClientMessage, ErrorCode,
-    PROTOCOL_VERSION, PoolSettingsDto, PoolShotDto, PoolStateDto, ServerMessage, SessionKindDto,
+    CheckersClockModeDto, CheckersSettingsDto, CheckersStateDto, ChessSettingsDto, ChessStateDto,
+    ClientMessage, ErrorCode, PROTOCOL_VERSION, PoolSettingsDto, PoolShotDto, PoolStateDto,
+    ServerMessage, SessionKindDto,
 };
 
 use crate::mapping::{
     ball_group_to_dto, checkers_color_to_dto, checkers_move_to_dto, checkers_outcome_to_dto,
+    chess_captured_to_strings, chess_color_to_dto, chess_move_to_dto, chess_outcome_to_dto,
     game_kind_from_dto, game_kind_to_dto, local_mode_from_dto, local_mode_to_dto,
     notation_path_to_squares, pool_balls_to_dto, pool_foul_to_dto, pool_outcome_to_dto,
     pool_settings_from_dto, pool_settings_to_dto, pool_shot_from_dto, pool_shot_to_dto,
@@ -270,6 +273,119 @@ impl LocalPoolSession {
     }
 }
 
+/// Active offline Chess match managed by [`LocalSessionAdapter`].
+///
+/// In `LocalMode::VsBot(_)`, the browser runs `nmrugg/stockfish.js` (Stockfish 19 WASM Web Worker)
+/// and submits moves back via `ClientMessage::ChessMove` while `bot_thinking == true`.
+#[derive(Debug)]
+struct LocalChessSession {
+    game: ChessGame,
+    mode: LocalMode,
+    settings: ChessSettingsDto,
+    seat_colors: [ChessColor; 2],
+    turn_number: u32,
+    clocks_ms: [u32; 2],
+    turn_ms_left: u32,
+    clock_emit_accum_ms: u32,
+    draw_offered_by: Option<Seat>,
+}
+
+impl LocalChessSession {
+    fn new(mode: LocalMode, settings: ChessSettingsDto, seat_colors: [ChessColor; 2]) -> Self {
+        let game_ms = settings.game_minutes.saturating_mul(60_000);
+        let move_ms = settings.move_timer_secs.saturating_mul(1_000);
+        Self {
+            game: ChessGame::new(),
+            mode,
+            settings,
+            seat_colors,
+            turn_number: 1,
+            clocks_ms: [game_ms, game_ms],
+            turn_ms_left: move_ms,
+            clock_emit_accum_ms: 0,
+            draw_offered_by: None,
+        }
+    }
+
+    const fn bot_level(&self) -> Option<BotLevel> {
+        match self.mode {
+            LocalMode::VsBot(level) => Some(level),
+            LocalMode::Hotseat | LocalMode::FreePractice => None,
+        }
+    }
+
+    const fn active_seat(&self) -> Seat {
+        let [seat_one_color, _] = self.seat_colors;
+        if seat_one_color as u8 == self.game.position().turn as u8 {
+            Seat::One
+        } else {
+            Seat::Two
+        }
+    }
+
+    const fn is_bot_turn(&self) -> bool {
+        matches!(self.mode, LocalMode::VsBot(_)) && matches!(self.active_seat(), Seat::Two)
+    }
+
+    const fn reset_move_timer(&mut self) {
+        self.turn_ms_left = self.settings.move_timer_secs.saturating_mul(1_000);
+        self.clock_emit_accum_ms = 0;
+    }
+
+    fn to_snapshot_dto(&self) -> ChessStateDto {
+        let pos = self.game.position();
+        let in_check = self.game.in_check();
+        let check_square = if in_check {
+            pos.king_square(pos.turn).map(ChessSquare::raw)
+        } else {
+            None
+        };
+        let bot_thinking = self.is_bot_turn() && self.game.outcome().is_none();
+        ChessStateDto {
+            board: pos.to_board_string(),
+            fen: pos.to_fen(),
+            turn: chess_color_to_dto(pos.turn),
+            active_seat: seat_to_dto(self.active_seat()),
+            seat_colors: [
+                chess_color_to_dto(self.seat_colors[0]),
+                chess_color_to_dto(self.seat_colors[1]),
+            ],
+            turn_number: self.turn_number,
+            moves: self.game.move_history().to_vec(),
+            last_move: self.game.last_move().map(|m| [m.from.raw(), m.to.raw()]),
+            in_check,
+            check_square,
+            legal_moves: if bot_thinking {
+                Vec::new()
+            } else {
+                self.game
+                    .legal_moves()
+                    .iter()
+                    .copied()
+                    .map(chess_move_to_dto)
+                    .collect()
+            },
+            captured_by_white: chess_captured_to_strings(
+                self.game.captured_by_white(),
+                ChessColor::Black,
+            ),
+            captured_by_black: chess_captured_to_strings(
+                self.game.captured_by_black(),
+                ChessColor::White,
+            ),
+            settings: self.settings,
+            clocks_ms: self.clocks_ms,
+            turn_ms_left: self.turn_ms_left,
+            draw_offered_by: self.draw_offered_by.map(seat_to_dto),
+            bot_thinking,
+            outcome: self
+                .game
+                .outcome()
+                .map(|o| chess_outcome_to_dto(o, self.seat_colors)),
+        }
+    }
+}
+
 /// Offline [`GameTransport`] adapter for single-player Hotseat, vs. AI, and Free Practice.
 #[derive(Debug)]
 pub struct LocalSessionAdapter {
@@ -277,8 +393,10 @@ pub struct LocalSessionAdapter {
     active_game: Option<GameKind>,
     active_mode: Option<LocalMode>,
     checkers_settings: CheckersSettingsDto,
+    chess_settings: ChessSettingsDto,
     pool_settings: PoolSettings,
     checkers: Option<LocalCheckersSession>,
+    chess: Option<LocalChessSession>,
     pool: Option<LocalPoolSession>,
     rng: SplitMix64,
     outbox: VecDeque<ServerMessage>,
@@ -305,8 +423,10 @@ impl LocalSessionAdapter {
             active_game: None,
             active_mode: None,
             checkers_settings: CheckersSettingsDto::default(),
+            chess_settings: ChessSettingsDto::default(),
             pool_settings: PoolSettings::default(),
             checkers: None,
+            chess: None,
             pool: None,
             rng: SplitMix64::new(seed),
             outbox: VecDeque::new(),
@@ -321,11 +441,64 @@ impl LocalSessionAdapter {
         }
     }
 
+    fn emit_chess_snapshot(&mut self) {
+        if let Some(session) = &self.chess {
+            self.outbox.push_back(ServerMessage::ChessSnapshot {
+                state: session.to_snapshot_dto(),
+            });
+        }
+    }
+
     fn emit_pool_snapshot(&mut self) {
         if let Some(session) = &self.pool {
             self.outbox.push_back(ServerMessage::PoolSnapshot {
                 state: session.to_snapshot_dto(),
             });
+        }
+    }
+
+    fn handle_chess_move(&mut self, turn: u32, uci: &str) {
+        let Some(session) = self.chess.as_mut() else {
+            self.push_error(ErrorCode::NotAllowed, "chess.move");
+            return;
+        };
+        if session.game.outcome().is_some() {
+            self.push_error(ErrorCode::NotAllowed, "chess.move");
+            return;
+        }
+        if turn != session.turn_number {
+            self.push_error(ErrorCode::StaleTurn, "chess.move");
+            return;
+        }
+        // Empty UCI while it's the bot's turn triggers the built-in Rust fallback AI
+        // (used if the Stockfish Web Worker cannot start in a restricted browser).
+        let chosen_uci = if uci.is_empty() && session.is_bot_turn() {
+            let level = session.bot_level().unwrap_or(BotLevel::Medium);
+            let mut search = ChessSearch::new(session.game.position(), level, self.rng.next_u64());
+            let Some(mv) = search.run_to_completion() else {
+                return;
+            };
+            mv.to_uci()
+        } else {
+            uci.to_owned()
+        };
+        if session.game.apply_uci(&chosen_uci).is_err() {
+            self.push_error(ErrorCode::IllegalAction, "chess.move");
+            return;
+        }
+        session.turn_number = session.turn_number.saturating_add(1);
+        session.draw_offered_by = None;
+        session.reset_move_timer();
+        self.emit_chess_snapshot();
+    }
+
+    fn handle_chess_settings(&mut self, settings: ChessSettingsDto) {
+        self.chess_settings = settings;
+        if let Some(existing) = &self.chess {
+            let mode = existing.mode;
+            let colors = existing.seat_colors;
+            self.chess = Some(LocalChessSession::new(mode, settings, colors));
+            self.emit_chess_snapshot();
         }
     }
 
@@ -490,6 +663,22 @@ impl LocalSessionAdapter {
             return;
         }
 
+        if let Some(session) = self.chess.as_mut() {
+            let loser_color = if session.bot_level().is_some() {
+                let [seat_one_color, _] = session.seat_colors;
+                seat_one_color
+            } else {
+                session.game.position().turn
+            };
+            if session.game.resign(loser_color).is_err() {
+                self.push_error(ErrorCode::NotAllowed, "resign");
+                return;
+            }
+            session.draw_offered_by = None;
+            self.emit_chess_snapshot();
+            return;
+        }
+
         if let Some(session) = self.pool.as_mut() {
             if session.game.is_free_practice() {
                 self.push_error(ErrorCode::NotAllowed, "resign");
@@ -514,6 +703,22 @@ impl LocalSessionAdapter {
     }
 
     fn handle_draw_offer(&mut self) {
+        if let Some(session) = self.chess.as_mut() {
+            if session.game.outcome().is_some() {
+                self.push_error(ErrorCode::NotAllowed, "draw.offer");
+                return;
+            }
+            if session.bot_level().is_some() {
+                // Computer politely declines draw offers in offline Stockfish mode unless forced.
+                session.draw_offered_by = None;
+                self.emit_chess_snapshot();
+                self.push_error(ErrorCode::NotAllowed, "draw.offer");
+            } else {
+                session.draw_offered_by = Some(session.active_seat());
+                self.emit_chess_snapshot();
+            }
+            return;
+        }
         let Some(session) = self.checkers.as_mut() else {
             self.push_error(ErrorCode::NotAllowed, "draw.offer");
             return;
@@ -548,6 +753,18 @@ impl LocalSessionAdapter {
     }
 
     fn handle_draw_answer(&mut self, accept: bool) {
+        if let Some(session) = self.chess.as_mut() {
+            if session.draw_offered_by.is_none() || session.game.outcome().is_some() {
+                self.push_error(ErrorCode::NotAllowed, "draw.answer");
+                return;
+            }
+            session.draw_offered_by = None;
+            if accept {
+                let _ = session.game.agree_draw();
+            }
+            self.emit_chess_snapshot();
+            return;
+        }
         let Some(session) = self.checkers.as_mut() else {
             self.push_error(ErrorCode::NotAllowed, "draw.answer");
             return;
@@ -576,6 +793,15 @@ impl LocalSessionAdapter {
                 &mut self.rng,
             ));
             self.emit_checkers_snapshot();
+            return;
+        }
+        if let Some(existing) = &self.chess {
+            let [s1, s2] = existing.seat_colors;
+            let swapped = [s2, s1];
+            let mode = existing.mode;
+            let settings = existing.settings;
+            self.chess = Some(LocalChessSession::new(mode, settings, swapped));
+            self.emit_chess_snapshot();
             return;
         }
         if let Some(existing) = &self.pool {
@@ -673,6 +899,53 @@ impl LocalSessionAdapter {
         }
     }
 
+    fn tick_chess(&mut self, dt_ms: u32) {
+        let mut needs_snapshot = false;
+
+        if let Some(session) = self.chess.as_mut()
+            && session.game.outcome().is_none()
+            && !session.is_bot_turn()
+        {
+            match session.settings.clock_mode {
+                CheckersClockModeDto::Unlimited => {}
+                CheckersClockModeDto::Move => {
+                    session.turn_ms_left = session.turn_ms_left.saturating_sub(dt_ms);
+                    session.clock_emit_accum_ms = session.clock_emit_accum_ms.saturating_add(dt_ms);
+                    if session.turn_ms_left == 0 {
+                        let active_color = session.game.position().turn;
+                        let _ = session.game.timeout(active_color);
+                        needs_snapshot = true;
+                    } else if session.clock_emit_accum_ms >= 250 {
+                        session.clock_emit_accum_ms = 0;
+                        needs_snapshot = true;
+                    }
+                }
+                CheckersClockModeDto::Game => {
+                    let active_seat = session.active_seat();
+                    let [c1, c2] = &mut session.clocks_ms;
+                    let active_clock = match active_seat {
+                        Seat::One => c1,
+                        Seat::Two => c2,
+                    };
+                    *active_clock = active_clock.saturating_sub(dt_ms);
+                    session.clock_emit_accum_ms = session.clock_emit_accum_ms.saturating_add(dt_ms);
+                    if *active_clock == 0 {
+                        let active_color = session.game.position().turn;
+                        let _ = session.game.timeout(active_color);
+                        needs_snapshot = true;
+                    } else if session.clock_emit_accum_ms >= 250 {
+                        session.clock_emit_accum_ms = 0;
+                        needs_snapshot = true;
+                    }
+                }
+            }
+        }
+
+        if needs_snapshot {
+            self.emit_chess_snapshot();
+        }
+    }
+
     fn tick_pool(&mut self, dt_ms: u32) {
         let mut emitted_shot: Option<ServerMessage> = None;
         let mut needs_snapshot = false;
@@ -766,7 +1039,9 @@ impl LocalSessionAdapter {
         }
         let domain_game = game_kind_from_dto(game);
         let domain_mode = local_mode_from_dto(mode);
-        if domain_game == GameKind::Checkers && domain_mode == LocalMode::FreePractice {
+        if matches!(domain_game, GameKind::Checkers | GameKind::Chess)
+            && domain_mode == LocalMode::FreePractice
+        {
             self.push_error(ErrorCode::Invalid, "local.start");
             return;
         }
@@ -775,6 +1050,7 @@ impl LocalSessionAdapter {
         let status = match domain_game {
             GameKind::Checkers => {
                 self.pool = None;
+                self.chess = None;
                 self.checkers = Some(LocalCheckersSession::new(
                     domain_mode,
                     self.checkers_settings,
@@ -785,6 +1061,7 @@ impl LocalSessionAdapter {
             }
             GameKind::Pool => {
                 self.checkers = None;
+                self.chess = None;
                 self.pool = Some(LocalPoolSession::new(
                     domain_mode,
                     self.pool_settings,
@@ -792,6 +1069,16 @@ impl LocalSessionAdapter {
                     &mut self.rng,
                 ));
                 "pool_active"
+            }
+            GameKind::Chess => {
+                self.checkers = None;
+                self.pool = None;
+                self.chess = Some(LocalChessSession::new(
+                    domain_mode,
+                    self.chess_settings,
+                    [ChessColor::White, ChessColor::Black],
+                ));
+                "chess_active"
             }
         };
         self.outbox.push_back(ServerMessage::SessionState {
@@ -802,6 +1089,7 @@ impl LocalSessionAdapter {
         match domain_game {
             GameKind::Checkers => self.emit_checkers_snapshot(),
             GameKind::Pool => self.emit_pool_snapshot(),
+            GameKind::Chess => self.emit_chess_snapshot(),
         }
     }
 }
@@ -831,6 +1119,7 @@ impl LocalSessionAdapter {
         self.active_game = None;
         self.active_mode = None;
         self.checkers = None;
+        self.chess = None;
         self.pool = None;
         self.outbox.push_back(ServerMessage::SessionState {
             game: None,
@@ -848,6 +1137,8 @@ impl GameTransport for LocalSessionAdapter {
             ClientMessage::LocalLeave {} => self.handle_local_leave(),
             ClientMessage::CheckersMove { turn, path } => self.handle_checkers_move(turn, &path),
             ClientMessage::CheckersSettings { settings } => self.handle_checkers_settings(settings),
+            ClientMessage::ChessMove { turn, uci } => self.handle_chess_move(turn, &uci),
+            ClientMessage::ChessSettings { settings } => self.handle_chess_settings(settings),
             ClientMessage::PoolShoot { shot } => self.handle_pool_shoot(shot),
             ClientMessage::PoolPlaceCue { x, y } => self.handle_pool_place_cue(x, y),
             ClientMessage::PoolSettings { settings } => self.handle_pool_settings(settings),
@@ -896,6 +1187,7 @@ impl GameTransport for LocalSessionAdapter {
 
     fn tick(&mut self, dt_ms: u32) {
         self.tick_checkers(dt_ms);
+        self.tick_chess(dt_ms);
         self.tick_pool(dt_ms);
     }
 }

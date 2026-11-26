@@ -43,6 +43,7 @@ const fn game_key(game: GameKind) -> u8 {
     match game {
         GameKind::Checkers => 0,
         GameKind::Pool => 1,
+        GameKind::Chess => 2,
     }
 }
 

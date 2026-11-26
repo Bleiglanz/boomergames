@@ -616,6 +616,19 @@ async fn handle_game_action_message(
             )
             .await
         }
+        ClientMessage::ChessMove { turn, uci } => {
+            send_table_cmd(
+                session,
+                state,
+                "chess.move",
+                TableCmd::ChessMove {
+                    user_id: uid,
+                    turn,
+                    uci,
+                },
+            )
+            .await
+        }
         ClientMessage::PoolShoot { shot } => {
             send_table_cmd(
                 session,

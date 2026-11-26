@@ -3,6 +3,10 @@
 use boomer_domain::checkers::{
     CheckersColor, CheckersMove, CheckersOutcome, DrawReason, Square, WinReason,
 };
+use boomer_domain::chess::{
+    ChessColor, ChessDrawReason, ChessMove, ChessOutcome, ChessPiece, ChessPieceKind,
+    ChessWinReason,
+};
 use boomer_domain::math::Vec2;
 use boomer_domain::pool::{
     AimAidLevel, BallGroup, BallInHandRule, BallState, EightOnBreakRule, PoolFoul, PoolOutcome,
@@ -12,9 +16,11 @@ use boomer_domain::{BotLevel, GameKind, Seat};
 use boomer_protocol::{
     AimAidLevelDto, BallGroupDto, BallInHandRuleDto, BotLevelDto, CheckersClockModeDto,
     CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto, CheckersOutcomeDto,
-    CheckersSettingsDto, CheckersWinReasonDto, EightOnBreakRuleDto, GameKindDto, HighscoreRowDto,
-    PoolBallDto, PoolFoulDto, PoolOutcomeDto, PoolSettingsDto, PoolShotDto, PoolWinReasonDto,
-    ProfileGameStatDto, ProfileMatchDto, SeatDto, TableSettingsDto, UserDto, UserStatusDto,
+    CheckersSettingsDto, CheckersWinReasonDto, ChessColorDto, ChessDrawReasonDto, ChessMoveDto,
+    ChessOutcomeDto, ChessSettingsDto, ChessWinReasonDto, EightOnBreakRuleDto, GameKindDto,
+    HighscoreRowDto, PoolBallDto, PoolFoulDto, PoolOutcomeDto, PoolSettingsDto, PoolShotDto,
+    PoolWinReasonDto, ProfileGameStatDto, ProfileMatchDto, SeatDto, TableSettingsDto, UserDto,
+    UserStatusDto,
 };
 
 use crate::ports::{HighscoreEntry, MatchHistoryItem, PlayerStatRecord, UserRecord};
@@ -25,6 +31,7 @@ pub const fn game_kind_from_dto(dto: GameKindDto) -> GameKind {
     match dto {
         GameKindDto::Checkers => GameKind::Checkers,
         GameKindDto::Pool => GameKind::Pool,
+        GameKindDto::Chess => GameKind::Chess,
     }
 }
 
@@ -34,15 +41,17 @@ pub const fn game_kind_to_dto(kind: GameKind) -> GameKindDto {
     match kind {
         GameKind::Checkers => GameKindDto::Checkers,
         GameKind::Pool => GameKindDto::Pool,
+        GameKind::Chess => GameKindDto::Chess,
     }
 }
 
-/// Converts a [`GameKind`] to its PostgreSQL `text` discriminator (`"pool"` or `"checkers"`).
+/// Converts a [`GameKind`] to its PostgreSQL `text` discriminator (`"pool"`, `"checkers"`, or `"chess"`).
 #[must_use]
 pub const fn game_kind_to_db(kind: GameKind) -> &'static str {
     match kind {
         GameKind::Checkers => "checkers",
         GameKind::Pool => "pool",
+        GameKind::Chess => "chess",
     }
 }
 
@@ -52,6 +61,7 @@ pub fn game_kind_from_db(raw: &str) -> Option<GameKind> {
     match raw {
         "checkers" => Some(GameKind::Checkers),
         "pool" => Some(GameKind::Pool),
+        "chess" => Some(GameKind::Chess),
         _ => None,
     }
 }
@@ -257,6 +267,91 @@ pub const fn checkers_settings_from_table(settings: &TableSettingsDto) -> Checke
             30
         },
         game_minutes,
+    }
+}
+
+/// Converts a domain [`ChessColor`] into [`ChessColorDto`].
+#[must_use]
+pub const fn chess_color_to_dto(color: ChessColor) -> ChessColorDto {
+    match color {
+        ChessColor::White => ChessColorDto::White,
+        ChessColor::Black => ChessColorDto::Black,
+    }
+}
+
+/// Converts a domain [`ChessMove`] into [`ChessMoveDto`].
+#[must_use]
+pub fn chess_move_to_dto(mv: ChessMove) -> ChessMoveDto {
+    ChessMoveDto {
+        from: mv.from.raw(),
+        to: mv.to.raw(),
+        uci: mv.to_uci(),
+        promotion: mv
+            .promotion
+            .and_then(ChessPieceKind::promotion_char)
+            .map(|c| c.to_string()),
+        is_capture: mv.is_capture,
+    }
+}
+
+/// Converts captured [`ChessPieceKind`]s into FEN-letter strings for `captured_color`.
+#[must_use]
+pub fn chess_captured_to_strings(
+    pieces: &[ChessPieceKind],
+    captured_color: ChessColor,
+) -> Vec<String> {
+    pieces
+        .iter()
+        .map(|&kind| ChessPiece::new(captured_color, kind).to_char().to_string())
+        .collect()
+}
+
+/// Converts a domain [`ChessOutcome`] into [`ChessOutcomeDto`].
+#[must_use]
+pub const fn chess_outcome_to_dto(
+    outcome: ChessOutcome,
+    seat_colors: [ChessColor; 2],
+) -> ChessOutcomeDto {
+    match outcome {
+        ChessOutcome::Win { winner, reason } => {
+            let [seat_one_color, _] = seat_colors;
+            let winner_seat = if seat_one_color as u8 == winner as u8 {
+                SeatDto::One
+            } else {
+                SeatDto::Two
+            };
+            let dto_reason = match reason {
+                ChessWinReason::Checkmate => ChessWinReasonDto::Checkmate,
+                ChessWinReason::Resign => ChessWinReasonDto::Resign,
+                ChessWinReason::Timeout => ChessWinReasonDto::Timeout,
+            };
+            ChessOutcomeDto::Win {
+                winner: chess_color_to_dto(winner),
+                winner_seat,
+                reason: dto_reason,
+            }
+        }
+        ChessOutcome::Draw { reason } => {
+            let dto_reason = match reason {
+                ChessDrawReason::Stalemate => ChessDrawReasonDto::Stalemate,
+                ChessDrawReason::Agreement => ChessDrawReasonDto::Agreement,
+                ChessDrawReason::ThreefoldRepetition => ChessDrawReasonDto::ThreefoldRepetition,
+                ChessDrawReason::FiftyMoveRule => ChessDrawReasonDto::FiftyMoveRule,
+                ChessDrawReason::InsufficientMaterial => ChessDrawReasonDto::InsufficientMaterial,
+            };
+            ChessOutcomeDto::Draw { reason: dto_reason }
+        }
+    }
+}
+
+/// Extracts [`ChessSettingsDto`] from [`TableSettingsDto`].
+#[must_use]
+pub const fn chess_settings_from_table(settings: &TableSettingsDto) -> ChessSettingsDto {
+    let cs = checkers_settings_from_table(settings);
+    ChessSettingsDto {
+        clock_mode: cs.clock_mode,
+        move_timer_secs: cs.move_timer_secs,
+        game_minutes: cs.game_minutes,
     }
 }
 

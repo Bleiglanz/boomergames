@@ -1,6 +1,6 @@
 import initWasm, { BoomerClient, BoomerRemoteClient } from "./wasm/boomer_client.js";
 
-export type GameKindDto = "checkers" | "pool";
+export type GameKindDto = "checkers" | "pool" | "chess";
 export type BotLevelDto = "easy" | "medium" | "hard";
 export type SeatDto = "1" | "2";
 export type RemoteRole = "offline" | "seat1" | "seat2" | "spectator";
@@ -65,6 +65,76 @@ export interface CheckersView {
   readonly highlightedTargets: readonly number[];
   readonly flipped: boolean;
   readonly showSquareNumbers: boolean;
+}
+
+export type ChessColorDto = "white" | "black";
+
+export interface ChessSettingsDto {
+  readonly clockMode: CheckersClockModeDto;
+  readonly moveTimerSecs: number;
+  readonly gameMinutes: number;
+}
+
+export interface ChessMoveDto {
+  readonly from: number;
+  readonly to: number;
+  readonly uci: string;
+  readonly promotion?: string;
+  readonly isCapture: boolean;
+}
+
+export type ChessOutcomeDto =
+  | {
+      readonly kind: "win";
+      readonly winner: ChessColorDto;
+      readonly winner_seat: SeatDto;
+      readonly reason: "checkmate" | "resign" | "timeout";
+    }
+  | {
+      readonly kind: "draw";
+      readonly reason:
+        | "stalemate"
+        | "agreement"
+        | "threefold_repetition"
+        | "fifty_move_rule"
+        | "insufficient_material";
+    };
+
+export interface ChessStateDto {
+  readonly board: string;
+  readonly fen: string;
+  readonly turn: ChessColorDto;
+  readonly activeSeat: SeatDto;
+  readonly seatColors: readonly [ChessColorDto, ChessColorDto];
+  readonly turnNumber: number;
+  readonly moves: readonly string[];
+  readonly lastMove: readonly [number, number] | null;
+  readonly inCheck: boolean;
+  readonly checkSquare: number | null;
+  readonly legalMoves: readonly ChessMoveDto[];
+  readonly capturedByWhite: readonly string[];
+  readonly capturedByBlack: readonly string[];
+  readonly settings: ChessSettingsDto;
+  readonly clocksMs: readonly [number, number];
+  readonly turnMsLeft: number;
+  readonly drawOfferedBy: SeatDto | null;
+  readonly botThinking: boolean;
+  readonly outcome: ChessOutcomeDto | null;
+}
+
+export interface ChessPendingPromotion {
+  readonly from: number;
+  readonly to: number;
+}
+
+export interface ChessView {
+  readonly state: ChessStateDto;
+  readonly selectedSquare: number | null;
+  readonly selectableSquares: readonly number[];
+  readonly highlightedTargets: readonly number[];
+  readonly pendingPromotion: ChessPendingPromotion | null;
+  readonly flipped: boolean;
+  readonly showCoords: boolean;
 }
 
 export type BallGroupDto = "solids" | "stripes";
@@ -154,6 +224,7 @@ export type ScreenView =
       readonly status: string;
       readonly checkers: CheckersView | null;
       readonly pool: PoolView | null;
+      readonly chess: ChessView | null;
     };
 
 export interface ViewModel {
@@ -177,6 +248,14 @@ export type UiInput =
   | { readonly kind: "checkers_flip_board" }
   | { readonly kind: "checkers_toggle_square_numbers" }
   | { readonly kind: "checkers_set_clock"; readonly settings: CheckersSettingsDto }
+  | { readonly kind: "chess_select_square"; readonly square: number }
+  | { readonly kind: "chess_drag_move"; readonly from: number; readonly to: number }
+  | { readonly kind: "chess_promote"; readonly piece: string }
+  | { readonly kind: "chess_clear_selection" }
+  | { readonly kind: "chess_flip_board" }
+  | { readonly kind: "chess_toggle_coords" }
+  | { readonly kind: "chess_set_clock"; readonly settings: ChessSettingsDto }
+  | { readonly kind: "chess_apply_bot_move"; readonly uci: string }
   | { readonly kind: "pool_set_aim"; readonly angle: number }
   | { readonly kind: "pool_set_power"; readonly power: number }
   | { readonly kind: "pool_set_spin"; readonly spin_x: number; readonly spin_y: number }

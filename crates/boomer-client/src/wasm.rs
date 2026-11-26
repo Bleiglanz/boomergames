@@ -101,6 +101,7 @@ impl BoomerRemoteClient {
         let kind = match game {
             "checkers" => GameKindDto::Checkers,
             "pool" => GameKindDto::Pool,
+            "chess" => GameKindDto::Chess,
             _ => return Err(JsValue::from_str("unknown game kind")),
         };
         let remote_role = match role {

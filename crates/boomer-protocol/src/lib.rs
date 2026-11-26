@@ -16,6 +16,7 @@
 
 pub mod auth;
 pub mod checkers;
+pub mod chess;
 pub mod envelope;
 pub mod lobby;
 pub mod pool;
@@ -26,6 +27,10 @@ pub use auth::{
 pub use checkers::{
     CheckersClockModeDto, CheckersColorDto, CheckersDrawReasonDto, CheckersMoveDto,
     CheckersOutcomeDto, CheckersSettingsDto, CheckersStateDto, CheckersWinReasonDto,
+};
+pub use chess::{
+    ChessColorDto, ChessDrawReasonDto, ChessMoveDto, ChessOutcomeDto, ChessSettingsDto,
+    ChessStateDto, ChessWinReasonDto,
 };
 pub use envelope::{
     BotLevelDto, ClientMessage, ErrorCode, GameKindDto, LocalModeDto, PROTOCOL_VERSION, SeatDto,

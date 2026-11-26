@@ -23,6 +23,28 @@ export interface Strings {
   readonly checkersDesc: string;
   readonly poolTitle: string;
   readonly poolDesc: string;
+  readonly chessTitle: string;
+  readonly chessDesc: string;
+  readonly chessBotEasy: string;
+  readonly chessBotMedium: string;
+  readonly chessBotHard: string;
+  readonly chessKeysHint: string;
+  readonly chessShowCoords: string;
+  readonly chessNoMovesYet: string;
+  readonly chessColorWhite: string;
+  readonly chessColorBlack: string;
+  readonly chessInCheck: string;
+  readonly chessPromotePrompt: string;
+  readonly chessPromoteQueen: string;
+  readonly chessPromoteRook: string;
+  readonly chessPromoteBishop: string;
+  readonly chessPromoteKnight: string;
+  readonly chessWinCheckmate: string;
+  readonly chessDrawStalemate: string;
+  readonly chessDrawFiftyMove: string;
+  readonly chessDrawInsufficient: string;
+  readonly chessStockfishThinking: string;
+  readonly chessEngineCreditsPrefix: string;
   readonly hotseat: string;
   readonly botEasy: string;
   readonly botMedium: string;
@@ -216,6 +238,28 @@ const EN: Strings = {
   checkersDesc: "8×8 classic board, mandatory captures, multi-jumps, and 3 computer skill levels.",
   poolTitle: "8-Ball Pool",
   poolDesc: "Classic 2D top-down table, deterministic Swept-CCD physics, English spin, and 3 computer skill levels.",
+  chessTitle: "Chess",
+  chessDesc: "Full FIDE rules, castling, en passant, promotions, clocks, and Stockfish 19 single-player AI.",
+  chessBotEasy: "vs. Stockfish (Easy)",
+  chessBotMedium: "vs. Stockfish (Medium)",
+  chessBotHard: "vs. Stockfish (Hard)",
+  chessKeysHint: "Keys: Arrows move cursor, Enter/Space select, Esc clear, F full-screen 3D.",
+  chessShowCoords: "a–h / 1–8 Coords",
+  chessNoMovesYet: "No moves yet. White moves first.",
+  chessColorWhite: "White",
+  chessColorBlack: "Black",
+  chessInCheck: "Check!",
+  chessPromotePrompt: "Choose promotion piece:",
+  chessPromoteQueen: "♕ Queen",
+  chessPromoteRook: "♖ Rook",
+  chessPromoteBishop: "♗ Bishop",
+  chessPromoteKnight: "♘ Knight",
+  chessWinCheckmate: "wins by checkmate!",
+  chessDrawStalemate: "Draw by stalemate.",
+  chessDrawFiftyMove: "Draw by 50-move rule.",
+  chessDrawInsufficient: "Draw by insufficient material.",
+  chessStockfishThinking: "Stockfish is thinking…",
+  chessEngineCreditsPrefix: "Chess AI:",
   hotseat: "Hotseat (2P)",
   botEasy: "vs. Bot (Easy)",
   botMedium: "vs. Bot (Medium)",
@@ -294,7 +338,7 @@ const EN: Strings = {
   navOfflinePlay: "Offline Play",
   loungeOfflineTitle: "Online Lounge Unavailable Here",
   loungeOfflineDesc:
-    "This page is running as a static offline build (no live multiplayer server). You can play Checkers and 8-Ball Pool offline against the computer or hotseat right now!",
+    "This page is running as a static offline build (no live multiplayer server). You can play Chess, Checkers, and 8-Ball Pool offline against the computer or hotseat right now!",
   loungePlayOfflineBtn: "Play Offline Games",
   loungeRetryBtn: "Retry Connection",
   loungeConnecting: "Connecting to Boomergames lounge…",
@@ -408,6 +452,28 @@ const DE: Strings = {
   checkersDesc: "Klassisches 8×8-Brett, Schlagzwang, Mehrfachsprünge und 3 Computer-Stufen.",
   poolTitle: "8-Ball Billard",
   poolDesc: "Klassischer 2D-Tisch von oben, deterministische Physik, Effet und 3 Computer-Stufen.",
+  chessTitle: "Schach",
+  chessDesc: "Vollständige FIDE-Regeln, Rochade, En Passant, Umwandlung, Uhren und Stockfish 19 Einzelspieler-KI.",
+  chessBotEasy: "gegen Stockfish (Leicht)",
+  chessBotMedium: "gegen Stockfish (Mittel)",
+  chessBotHard: "gegen Stockfish (Schwer)",
+  chessKeysHint: "Tasten: Pfeile bewegen Cursor, Enter/Leertaste wählen, Esc abbrechen, F Vollbild-3D.",
+  chessShowCoords: "a–h / 1–8 Koordinaten",
+  chessNoMovesYet: "Noch keine Züge. Weiß beginnt.",
+  chessColorWhite: "Weiß",
+  chessColorBlack: "Schwarz",
+  chessInCheck: "Schach!",
+  chessPromotePrompt: "Bauernumwandlung wählen:",
+  chessPromoteQueen: "♕ Dame",
+  chessPromoteRook: "♖ Turm",
+  chessPromoteBishop: "♗ Läufer",
+  chessPromoteKnight: "♘ Springer",
+  chessWinCheckmate: "gewinnt durch Schachmatt!",
+  chessDrawStalemate: "Unentschieden durch Patt.",
+  chessDrawFiftyMove: "Unentschieden nach der 50-Züge-Regel.",
+  chessDrawInsufficient: "Unentschieden wegen unzureichendem Material.",
+  chessStockfishThinking: "Stockfish überlegt…",
+  chessEngineCreditsPrefix: "Schach-KI:",
   hotseat: "Lokal (2 Spieler)",
   botEasy: "gegen Bot (Leicht)",
   botMedium: "gegen Bot (Mittel)",
@@ -486,7 +552,7 @@ const DE: Strings = {
   navOfflinePlay: "Offline spielen",
   loungeOfflineTitle: "Online-Lounge hier nicht verfügbar",
   loungeOfflineDesc:
-    "Diese Seite läuft als statische Offline-Version (ohne Live-Server). Dame und 8-Ball Billard sind direkt offline gegen den Computer oder lokal zu zweit spielbar!",
+    "Diese Seite läuft als statische Offline-Version (ohne Live-Server). Schach, Dame und 8-Ball Billard sind direkt offline gegen den Computer oder lokal zu zweit spielbar!",
   loungePlayOfflineBtn: "Offline spielen",
   loungeRetryBtn: "Erneut verbinden",
   loungeConnecting: "Verbinde mit der Boomergames-Lounge…",

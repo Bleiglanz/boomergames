@@ -15,6 +15,7 @@
 )]
 
 pub mod checkers;
+pub mod chess;
 pub mod math;
 pub mod pool;
 pub mod rating;
@@ -27,6 +28,8 @@ pub enum GameKind {
     Checkers,
     /// Standard WPA/BCA 8-ball pool.
     Pool,
+    /// Standard FIDE Chess (8x8 board).
+    Chess,
 }
 
 /// Player seat at a two-player game table.

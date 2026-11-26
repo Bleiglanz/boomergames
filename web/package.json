@@ -4,12 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "sync-stockfish": "mkdir -p public/stockfish && cp node_modules/stockfish/bin/stockfish-19-lite-single.js node_modules/stockfish/bin/stockfish-19-lite-single.wasm public/stockfish/",
+    "predev": "npm run sync-stockfish",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
+    "prebuild": "npm run sync-stockfish",
     "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "stockfish": "^19.0.1",
     "three": "^0.174.0"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 
 import { CheckersScene, type CheckersBoardCallbacks } from "./checkers_scene.js";
+import { ChessScene, type ChessBoardCallbacks } from "./chess_scene.js";
 import {
   BALL_RADIUS,
   POOL_RAIL_MARGIN,
@@ -10,10 +11,11 @@ import {
   PoolScene,
   type PoolTableCallbacks,
 } from "./pool_scene.js";
-import type { CheckersView, GameKindDto, PoolView } from "../wasm_bridge.js";
+import type { CheckersView, ChessView, GameKindDto, PoolView } from "../wasm_bridge.js";
 
 export interface StageCallbacks {
   readonly checkers: CheckersBoardCallbacks;
+  readonly chess: ChessBoardCallbacks;
   readonly pool: PoolTableCallbacks;
   readonly on3DChange?: (is3D: boolean) => void;
 }
@@ -41,6 +43,7 @@ export class StageRenderer {
   private readonly scene: THREE.Scene;
   private readonly poolScene: PoolScene;
   private readonly checkersScene: CheckersScene;
+  private readonly chessScene: ChessScene;
   private readonly on3DChange?: (is3D: boolean) => void;
   private activeGame: GameKindDto | null = null;
   private readonly canvas: HTMLCanvasElement;
@@ -99,11 +102,16 @@ export class StageRenderer {
 
     this.poolScene = new PoolScene(callbacks.pool);
     this.checkersScene = new CheckersScene(callbacks.checkers);
+    this.chessScene = new ChessScene(callbacks.chess);
     this.scene.add(this.poolScene.root);
     this.scene.add(this.checkersScene.root);
+    this.scene.add(this.chessScene.root);
 
     this.onContextMenuBound = (ev: MouseEvent): void => {
-      if (this.activeGame === "pool" || (this.activeGame === "checkers" && this.gameFullscreen)) {
+      if (
+        this.activeGame === "pool" ||
+        ((this.activeGame === "checkers" || this.activeGame === "chess") && this.gameFullscreen)
+      ) {
         ev.preventDefault();
       }
     };
@@ -114,8 +122,10 @@ export class StageRenderer {
         if (this.gameFullscreen && this.activeGame !== null && this.activeTouches.size === 2) {
           if (this.activeGame === "pool") {
             this.poolScene.cancelSlingshot();
-          } else {
+          } else if (this.activeGame === "checkers") {
             this.checkersScene.cancelDrag();
+          } else {
+            this.chessScene.cancelDrag();
           }
           const pts = Array.from(this.activeTouches.values());
           const a = pts[0];
@@ -131,7 +141,9 @@ export class StageRenderer {
       const busyPrimaryDrag =
         this.activeGame === "pool"
           ? this.poolScene.isSlingshotActive()
-          : this.checkersScene.isDragActive();
+          : this.activeGame === "checkers"
+            ? this.checkersScene.isDragActive()
+            : this.chessScene.isDragActive();
 
       const wantsOrbit =
         this.gameFullscreen &&
@@ -157,12 +169,18 @@ export class StageRenderer {
         this.checkersScene.cancelDrag();
         return;
       }
+      if (ev.button === 2 && this.activeGame === "chess") {
+        this.chessScene.cancelDrag();
+        return;
+      }
 
       this.canvas.focus();
       this.canvas.setPointerCapture(ev.pointerId);
       const [wx, wy] = this.clientToWorld(ev.clientX, ev.clientY);
       if (this.activeGame === "checkers") {
         this.checkersScene.handlePointerDown(wx, wy, ev.clientX, ev.clientY);
+      } else if (this.activeGame === "chess") {
+        this.chessScene.handlePointerDown(wx, wy, ev.clientX, ev.clientY);
       } else if (this.activeGame === "pool") {
         this.poolScene.handlePointerDown(wx, wy);
       }
@@ -205,6 +223,8 @@ export class StageRenderer {
       const [wx, wy] = this.clientToWorld(ev.clientX, ev.clientY);
       if (this.activeGame === "checkers") {
         this.checkersScene.handlePointerMove(wx, wy, ev.clientX, ev.clientY);
+      } else if (this.activeGame === "chess") {
+        this.chessScene.handlePointerMove(wx, wy, ev.clientX, ev.clientY);
       } else if (this.activeGame === "pool") {
         this.poolScene.handlePointerMove(wx, wy);
       }
@@ -228,6 +248,8 @@ export class StageRenderer {
       const [wx, wy] = this.clientToWorld(ev.clientX, ev.clientY);
       if (this.activeGame === "checkers") {
         this.checkersScene.handlePointerUp(wx, wy);
+      } else if (this.activeGame === "chess") {
+        this.chessScene.handlePointerUp(wx, wy);
       } else if (this.activeGame === "pool") {
         this.poolScene.handlePointerUp(wx, wy);
       }
@@ -248,6 +270,8 @@ export class StageRenderer {
 
     this.onKeyDownBound = (ev: KeyboardEvent): void => {
       if (this.activeGame === "checkers" && this.checkersScene.handleKeyDown(ev.key)) {
+        ev.preventDefault();
+      } else if (this.activeGame === "chess" && this.chessScene.handleKeyDown(ev.key)) {
         ev.preventDefault();
       } else if (this.activeGame === "pool" && ev.key === "Escape") {
         this.poolScene.cancelSlingshot();
@@ -275,6 +299,7 @@ export class StageRenderer {
     this.activeGame = game;
     this.poolScene.root.visible = game === "pool";
     this.checkersScene.root.visible = game === "checkers";
+    this.chessScene.root.visible = game === "chess";
     this.scene.background = game === "pool" ? BG_POOL_2D : BG_CHECKERS_2D;
     this.setGameFullscreen(false);
     this.updateCameraProjection(this.lastAspect);
@@ -297,6 +322,7 @@ export class StageRenderer {
       this.camLookY = cy;
       this.poolScene.set3DVisualBlend(0);
       this.checkersScene.set3DVisualBlend(0);
+      this.chessScene.set3DVisualBlend(0);
       this.report3DState(false);
     } else {
       this.targetLookX = cx;
@@ -354,6 +380,10 @@ export class StageRenderer {
     this.checkersScene.sync(view);
   }
 
+  public syncChess(view: ChessView): void {
+    this.chessScene.sync(view);
+  }
+
   public syncPool(view: PoolView): void {
     this.poolScene.syncView(view);
   }
@@ -390,8 +420,12 @@ export class StageRenderer {
     this.renderer.dispose();
   }
 
+  private isBoardGame(): boolean {
+    return this.activeGame === "checkers" || this.activeGame === "chess";
+  }
+
   private defaultCenter(): readonly [number, number] {
-    return this.activeGame === "checkers"
+    return this.isBoardGame()
       ? [4.0, 4.0]
       : [POOL_TABLE_WIDTH / 2, POOL_TABLE_HEIGHT / 2];
   }
@@ -441,10 +475,13 @@ export class StageRenderer {
     const in3D = this.isUsingPerspective();
     this.report3DState(in3D);
 
-    const isCheckers = this.activeGame === "checkers";
+    const isBoard = this.isBoardGame();
     if (!in3D) {
-      if (isCheckers) {
+      if (this.activeGame === "checkers") {
         this.checkersScene.set3DVisualBlend(0);
+        this.scene.background = BG_CHECKERS_2D;
+      } else if (this.activeGame === "chess") {
+        this.chessScene.set3DVisualBlend(0);
         this.scene.background = BG_CHECKERS_2D;
       } else {
         this.poolScene.set3DVisualBlend(0);
@@ -455,8 +492,12 @@ export class StageRenderer {
 
     // Smoothly blend lighting & parlor room backdrop as camera tilts off straight +Z
     const blend = Math.min(1, this.camTilt / 0.28);
-    if (isCheckers) {
-      this.checkersScene.set3DVisualBlend(blend);
+    if (isBoard) {
+      if (this.activeGame === "checkers") {
+        this.checkersScene.set3DVisualBlend(blend);
+      } else {
+        this.chessScene.set3DVisualBlend(blend);
+      }
       BG_WORK.copy(BG_CHECKERS_2D).lerp(BG_CHECKERS_3D, blend);
     } else {
       this.poolScene.set3DVisualBlend(blend);
@@ -498,7 +539,7 @@ export class StageRenderer {
     const ny = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
     this.ndc.set(nx * 2 - 1, -(ny * 2 - 1));
     this.raycaster.setFromCamera(this.ndc, this.activeCamera());
-    const plane = this.activeGame === "checkers" ? CHECKERS_PLANE : FELT_PLANE;
+    const plane = this.isBoardGame() ? CHECKERS_PLANE : FELT_PLANE;
     if (this.raycaster.ray.intersectPlane(plane, this.hitPoint) !== null) {
       if (this.activeGame === "pool") {
         const clampedX = Math.max(-1.5, Math.min(POOL_TABLE_WIDTH + 1.5, this.hitPoint.x));
@@ -511,14 +552,13 @@ export class StageRenderer {
   }
 
   private updateCameraProjection(aspect: number): void {
-    const worldW =
-      this.activeGame === "checkers"
-        ? 8.9
-        : POOL_TABLE_WIDTH + (POOL_RAIL_MARGIN + POOL_STAGE_BORDER) * 2;
-    const worldH =
-      this.activeGame === "checkers"
-        ? 8.9
-        : POOL_TABLE_HEIGHT + (POOL_RAIL_MARGIN + POOL_STAGE_BORDER) * 2;
+    const isBoard = this.isBoardGame();
+    const worldW = isBoard
+      ? 8.9
+      : POOL_TABLE_WIDTH + (POOL_RAIL_MARGIN + POOL_STAGE_BORDER) * 2;
+    const worldH = isBoard
+      ? 8.9
+      : POOL_TABLE_HEIGHT + (POOL_RAIL_MARGIN + POOL_STAGE_BORDER) * 2;
     const worldAspect = worldW / worldH;
 
     let halfW = worldW / 2;
@@ -530,8 +570,8 @@ export class StageRenderer {
     }
     this.orthoHalfH = halfH;
 
-    const cx = this.activeGame === "checkers" ? 4.0 : POOL_TABLE_WIDTH / 2;
-    const cy = this.activeGame === "checkers" ? 4.0 : POOL_TABLE_HEIGHT / 2;
+    const cx = isBoard ? 4.0 : POOL_TABLE_WIDTH / 2;
+    const cy = isBoard ? 4.0 : POOL_TABLE_HEIGHT / 2;
 
     this.orthoCamera.position.set(cx, cy, 5);
     this.orthoCamera.up.set(0, 1, 0);

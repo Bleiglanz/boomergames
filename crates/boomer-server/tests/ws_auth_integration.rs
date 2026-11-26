@@ -244,7 +244,7 @@ async fn guest_reconnect_preserves_identity() {
             assert_eq!(mode, SessionKindDto::Remote);
             assert!(me.guest);
             assert!(me.name.starts_with("Guest_"));
-            assert_eq!(rooms.len(), 2);
+            assert_eq!(rooms.len(), 3);
             (me.id, tok)
         }
         other => panic!("unexpected welcome: {other:?}"),

@@ -115,7 +115,7 @@ pub const fn qualifies_for_highscore(
         return false;
     }
     let min_activity = match game {
-        GameKind::Checkers => MIN_CHECKERS_PLIES_FOR_HIGHSCORE,
+        GameKind::Checkers | GameKind::Chess => MIN_CHECKERS_PLIES_FOR_HIGHSCORE,
         GameKind::Pool => MIN_POOL_SHOTS_FOR_HIGHSCORE,
     };
     activity_count >= min_activity

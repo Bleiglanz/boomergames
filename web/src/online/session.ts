@@ -702,6 +702,7 @@ export class OnlineSession {
         break;
       }
       case "checkers.snapshot":
+      case "chess.snapshot":
       case "pool.snapshot": {
         this.latestGameFrameJson = rawJson;
         if (this.state.activeTable !== null && this.state.activeTable.phase === "waiting") {

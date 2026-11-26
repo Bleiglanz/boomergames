@@ -3,6 +3,10 @@
 use boomer_domain::checkers::{
     CheckersColor, CheckersMove, CheckersOutcome, DrawReason, Square, WinReason,
 };
+use boomer_domain::chess::{
+    ChessColor, ChessDrawReason, ChessMove, ChessOutcome, ChessPiece, ChessPieceKind,
+    ChessWinReason,
+};
 use boomer_domain::math::Vec2;
 use boomer_domain::pool::constants::BALL_COUNT;
 use boomer_domain::pool::{
@@ -13,6 +17,7 @@ use boomer_domain::{BotLevel, GameKind, LocalMode, Seat};
 use boomer_protocol::{
     AimAidLevelDto, BallGroupDto, BallInHandRuleDto, BotLevelDto, CheckersColorDto,
     CheckersDrawReasonDto, CheckersMoveDto, CheckersOutcomeDto, CheckersWinReasonDto,
+    ChessColorDto, ChessDrawReasonDto, ChessMoveDto, ChessOutcomeDto, ChessWinReasonDto,
     EightOnBreakRuleDto, GameKindDto, LocalModeDto, PoolBallDto, PoolFoulDto, PoolOutcomeDto,
     PoolSettingsDto, PoolShotDto, PoolWinReasonDto, SeatDto,
 };
@@ -23,6 +28,7 @@ pub const fn game_kind_from_dto(dto: GameKindDto) -> GameKind {
     match dto {
         GameKindDto::Checkers => GameKind::Checkers,
         GameKindDto::Pool => GameKind::Pool,
+        GameKindDto::Chess => GameKind::Chess,
     }
 }
 
@@ -32,6 +38,7 @@ pub const fn game_kind_to_dto(kind: GameKind) -> GameKindDto {
     match kind {
         GameKind::Checkers => GameKindDto::Checkers,
         GameKind::Pool => GameKindDto::Pool,
+        GameKind::Chess => GameKindDto::Chess,
     }
 }
 
@@ -163,6 +170,80 @@ pub const fn ball_group_to_dto(group: BallGroup) -> BallGroupDto {
     match group {
         BallGroup::Solids => BallGroupDto::Solids,
         BallGroup::Stripes => BallGroupDto::Stripes,
+    }
+}
+
+/// Converts a domain [`ChessColor`] into a protocol [`ChessColorDto`].
+#[must_use]
+pub const fn chess_color_to_dto(color: ChessColor) -> ChessColorDto {
+    match color {
+        ChessColor::White => ChessColorDto::White,
+        ChessColor::Black => ChessColorDto::Black,
+    }
+}
+
+/// Converts a domain [`ChessMove`] into a protocol [`ChessMoveDto`].
+#[must_use]
+pub fn chess_move_to_dto(mv: ChessMove) -> ChessMoveDto {
+    ChessMoveDto {
+        from: mv.from.raw(),
+        to: mv.to.raw(),
+        uci: mv.to_uci(),
+        promotion: mv
+            .promotion
+            .and_then(ChessPieceKind::promotion_char)
+            .map(|c| c.to_string()),
+        is_capture: mv.is_capture,
+    }
+}
+
+/// Converts captured [`ChessPieceKind`]s into FEN-letter strings.
+#[must_use]
+pub fn chess_captured_to_strings(
+    pieces: &[ChessPieceKind],
+    captured_color: ChessColor,
+) -> Vec<String> {
+    pieces
+        .iter()
+        .map(|&kind| ChessPiece::new(captured_color, kind).to_char().to_string())
+        .collect()
+}
+
+/// Converts a domain [`ChessOutcome`] into a protocol [`ChessOutcomeDto`].
+#[must_use]
+pub const fn chess_outcome_to_dto(
+    outcome: ChessOutcome,
+    seat_colors: [ChessColor; 2],
+) -> ChessOutcomeDto {
+    match outcome {
+        ChessOutcome::Win { winner, reason } => {
+            let [seat_one_color, _] = seat_colors;
+            let winner_seat = if seat_one_color as u8 == winner as u8 {
+                SeatDto::One
+            } else {
+                SeatDto::Two
+            };
+            let dto_reason = match reason {
+                ChessWinReason::Checkmate => ChessWinReasonDto::Checkmate,
+                ChessWinReason::Resign => ChessWinReasonDto::Resign,
+                ChessWinReason::Timeout => ChessWinReasonDto::Timeout,
+            };
+            ChessOutcomeDto::Win {
+                winner: chess_color_to_dto(winner),
+                winner_seat,
+                reason: dto_reason,
+            }
+        }
+        ChessOutcome::Draw { reason } => {
+            let dto_reason = match reason {
+                ChessDrawReason::Stalemate => ChessDrawReasonDto::Stalemate,
+                ChessDrawReason::Agreement => ChessDrawReasonDto::Agreement,
+                ChessDrawReason::ThreefoldRepetition => ChessDrawReasonDto::ThreefoldRepetition,
+                ChessDrawReason::FiftyMoveRule => ChessDrawReasonDto::FiftyMoveRule,
+                ChessDrawReason::InsufficientMaterial => ChessDrawReasonDto::InsufficientMaterial,
+            };
+            ChessOutcomeDto::Draw { reason: dto_reason }
+        }
     }
 }
 

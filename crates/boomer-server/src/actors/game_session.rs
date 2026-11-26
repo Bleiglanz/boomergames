@@ -6,21 +6,28 @@ use std::sync::Arc;
 use boomer_domain::checkers::{
     CheckersColor, CheckersGame, CheckersOutcome, CheckersSearch, DrawReason, WinReason,
 };
+use boomer_domain::chess::{
+    ChessColor, ChessDrawReason, ChessGame, ChessOutcome, ChessPosition, ChessSearch,
+    ChessWinReason,
+};
 use boomer_domain::math::Vec2;
 use boomer_domain::pool::{PoolGame, PoolSearch, PoolWinReason, ShotInput};
 use boomer_domain::{BotLevel, Seat};
 use boomer_protocol::{
-    BotLevelDto, CheckersClockModeDto, CheckersSettingsDto, CheckersStateDto, ErrorCode,
-    PoolBallDto, PoolShotDto, PoolStateDto, SeatDto, ServerMessage, TableSettingsDto,
+    BotLevelDto, CheckersClockModeDto, CheckersSettingsDto, CheckersStateDto, ChessSettingsDto,
+    ChessStateDto, ErrorCode, PoolBallDto, PoolShotDto, PoolStateDto, SeatDto, ServerMessage,
+    TableSettingsDto,
 };
 use tokio::sync::{Semaphore, mpsc};
 
 use crate::actors::table_actor::TableCmd;
 use crate::mapping::{
     ball_group_to_dto, bot_level_from_dto, checkers_color_to_dto, checkers_move_to_dto,
-    checkers_outcome_to_dto, checkers_settings_from_table, notation_path_to_squares,
-    pool_balls_to_dto, pool_foul_to_dto, pool_outcome_to_dto, pool_settings_from_table,
-    pool_settings_to_dto, pool_shot_from_dto, pool_shot_to_dto, seat_to_dto,
+    checkers_outcome_to_dto, checkers_settings_from_table, chess_captured_to_strings,
+    chess_color_to_dto, chess_move_to_dto, chess_outcome_to_dto, chess_settings_from_table,
+    notation_path_to_squares, pool_balls_to_dto, pool_foul_to_dto, pool_outcome_to_dto,
+    pool_settings_from_table, pool_settings_to_dto, pool_shot_from_dto, pool_shot_to_dto,
+    seat_to_dto,
 };
 
 /// Terminal outcome summary passed to `MatchRepo` for atomic Elo + High Score persistence.
@@ -43,6 +50,8 @@ pub enum BotDecision {
     CheckersMove(Vec<u8>),
     /// Selected Pool shot.
     PoolShot(PoolShotDto),
+    /// Selected Chess UCI move (`e2e4`, `e7e8q`).
+    ChessMove(String),
 }
 
 /// Active authoritative game engine inside a [`super::table_actor::TableActor`].
@@ -51,6 +60,8 @@ pub enum ActiveGame {
     Checkers(ServerCheckersMatch),
     /// Live authoritative WPA/BCA 8-ball pool match.
     Pool(Box<ServerPoolMatch>),
+    /// Live authoritative FIDE Chess match.
+    Chess(Box<ServerChessMatch>),
 }
 
 impl ActiveGame {
@@ -60,6 +71,7 @@ impl ActiveGame {
         match self {
             Self::Checkers(m) => m.turn_number,
             Self::Pool(m) => m.game.turn_number(),
+            Self::Chess(m) => m.turn_number,
         }
     }
 
@@ -75,6 +87,10 @@ impl ActiveGame {
                 Seat::One => 0,
                 Seat::Two => 1,
             },
+            Self::Chess(m) => match m.active_seat() {
+                Seat::One => 0,
+                Seat::Two => 1,
+            },
         }
     }
 
@@ -84,6 +100,7 @@ impl ActiveGame {
         match self {
             Self::Checkers(m) => m.ms_left(),
             Self::Pool(m) => m.turn_ms_left as u64,
+            Self::Chess(m) => m.ms_left(),
         }
     }
 
@@ -97,6 +114,9 @@ impl ActiveGame {
             Self::Pool(m) => ServerMessage::PoolSnapshot {
                 state: m.to_dto(bot_thinking),
             },
+            Self::Chess(m) => ServerMessage::ChessSnapshot {
+                state: m.to_dto(bot_thinking),
+            },
         }
     }
 
@@ -106,6 +126,7 @@ impl ActiveGame {
         match self {
             Self::Checkers(m) => m.finish_info(),
             Self::Pool(m) => m.finish_info(),
+            Self::Chess(m) => m.finish_info(),
         }
     }
 
@@ -114,6 +135,7 @@ impl ActiveGame {
         match self {
             Self::Checkers(m) => m.tick_one_sec(),
             Self::Pool(m) => m.tick_one_sec(),
+            Self::Chess(m) => m.tick_one_sec(),
         }
     }
 
@@ -130,6 +152,7 @@ impl ActiveGame {
         match self {
             Self::Checkers(m) => m.resign(seat),
             Self::Pool(m) => m.resign(seat),
+            Self::Chess(m) => m.resign(seat),
         }
     }
 }
@@ -528,6 +551,254 @@ impl ServerPoolMatch {
     }
 }
 
+/// Authoritative FIDE Chess match state.
+pub struct ServerChessMatch {
+    /// Core domain engine.
+    pub game: ChessGame,
+    /// Colors assigned to `[Seat 1, Seat 2]` (swapped on each rematch).
+    pub seat_colors: [ChessColor; 2],
+    /// Clock settings.
+    pub settings: ChessSettingsDto,
+    /// Monotonic turn counter starting at `1`.
+    pub turn_number: u32,
+    /// Per-seat remaining game clock milliseconds.
+    pub clocks_ms: [u32; 2],
+    /// Remaining per-move clock milliseconds.
+    pub turn_ms_left: u32,
+    /// Pending draw offer seat.
+    pub draw_offered_by: Option<Seat>,
+}
+
+impl ServerChessMatch {
+    /// Creates a new authoritative Chess match.
+    #[must_use]
+    pub fn new(seat_colors: [ChessColor; 2], table_settings: &TableSettingsDto) -> Self {
+        let settings = chess_settings_from_table(table_settings);
+        let game_ms = settings.game_minutes.saturating_mul(60_000);
+        let move_ms = settings.move_timer_secs.saturating_mul(1_000);
+        Self {
+            game: ChessGame::new(),
+            seat_colors,
+            settings,
+            turn_number: 1,
+            clocks_ms: [game_ms, game_ms],
+            turn_ms_left: move_ms,
+            draw_offered_by: None,
+        }
+    }
+
+    /// Returns the seat whose color is currently to move.
+    #[must_use]
+    pub const fn active_seat(&self) -> Seat {
+        let [seat_one_color, _] = self.seat_colors;
+        if seat_one_color as u8 == self.game.position().turn as u8 {
+            Seat::One
+        } else {
+            Seat::Two
+        }
+    }
+
+    /// Returns remaining milliseconds on the active clock.
+    #[must_use]
+    pub const fn ms_left(&self) -> u64 {
+        match self.settings.clock_mode {
+            CheckersClockModeDto::Unlimited => 0,
+            CheckersClockModeDto::Move => self.turn_ms_left as u64,
+            CheckersClockModeDto::Game => match self.active_seat() {
+                Seat::One => self.clocks_ms[0] as u64,
+                Seat::Two => self.clocks_ms[1] as u64,
+            },
+        }
+    }
+
+    /// Validates turn & seat and applies a UCI move string.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::NotYourTurn`], [`ErrorCode::StaleTurn`], or [`ErrorCode::IllegalAction`].
+    pub fn apply_move(&mut self, seat_idx: usize, turn: u32, uci: &str) -> Result<(), ErrorCode> {
+        let expected_idx = usize::from(matches!(self.active_seat(), Seat::Two));
+        if seat_idx != expected_idx {
+            return Err(ErrorCode::NotYourTurn);
+        }
+        if turn != self.turn_number {
+            return Err(ErrorCode::StaleTurn);
+        }
+        if self.game.apply_uci(uci).is_err() {
+            return Err(ErrorCode::IllegalAction);
+        }
+        self.turn_number = self.turn_number.saturating_add(1);
+        self.turn_ms_left = self.settings.move_timer_secs.saturating_mul(1_000);
+        self.draw_offered_by = None;
+        Ok(())
+    }
+
+    /// Offers a draw on behalf of `seat`.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::NotAllowed`] if already ended or draw already offered.
+    pub fn offer_draw(&mut self, seat: Seat) -> Result<(), ErrorCode> {
+        if self.game.outcome().is_some() || self.draw_offered_by.is_some() {
+            return Err(ErrorCode::NotAllowed);
+        }
+        self.draw_offered_by = Some(seat);
+        Ok(())
+    }
+
+    /// Answers a pending draw offer from the opposing seat.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::NotAllowed`] if no opponent draw offer is pending.
+    pub fn answer_draw(&mut self, responder: Seat, accept: bool) -> Result<(), ErrorCode> {
+        let Some(offerer) = self.draw_offered_by else {
+            return Err(ErrorCode::NotAllowed);
+        };
+        if offerer == responder {
+            return Err(ErrorCode::NotAllowed);
+        }
+        self.draw_offered_by = None;
+        if accept {
+            self.game.agree_draw().map_err(|_| ErrorCode::NotAllowed)?;
+        }
+        Ok(())
+    }
+
+    /// Resigns on behalf of `loser`.
+    ///
+    /// # Errors
+    /// Returns [`ErrorCode::NotAllowed`] if the match already ended.
+    pub fn resign(&mut self, loser: Seat) -> Result<(), ErrorCode> {
+        let color = match loser {
+            Seat::One => self.seat_colors[0],
+            Seat::Two => self.seat_colors[1],
+        };
+        self.game.resign(color).map_err(|_| ErrorCode::NotAllowed)
+    }
+
+    /// Advances the active clock by 1 second; triggers timeout loss when it hits zero.
+    pub fn tick_one_sec(&mut self) -> bool {
+        if self.game.outcome().is_some() {
+            return false;
+        }
+        match self.settings.clock_mode {
+            CheckersClockModeDto::Unlimited => false,
+            CheckersClockModeDto::Move => {
+                self.turn_ms_left = self.turn_ms_left.saturating_sub(1_000);
+                if self.turn_ms_left == 0 {
+                    let _ = self.game.timeout(self.game.position().turn);
+                    return true;
+                }
+                false
+            }
+            CheckersClockModeDto::Game => {
+                let idx = usize::from(matches!(self.active_seat(), Seat::Two));
+                if let Some(clock) = self.clocks_ms.get_mut(idx) {
+                    *clock = clock.saturating_sub(1_000);
+                    if *clock == 0 {
+                        let _ = self.game.timeout(self.game.position().turn);
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Builds a [`ChessStateDto`] for broadcast.
+    #[must_use]
+    pub fn to_dto(&self, bot_thinking: bool) -> ChessStateDto {
+        let pos = self.game.position();
+        let in_check = self.game.in_check();
+        let check_square = if in_check {
+            pos.king_square(pos.turn)
+                .map(boomer_domain::chess::ChessSquare::raw)
+        } else {
+            None
+        };
+        ChessStateDto {
+            board: pos.to_board_string(),
+            fen: pos.to_fen(),
+            turn: chess_color_to_dto(pos.turn),
+            active_seat: seat_to_dto(self.active_seat()),
+            seat_colors: [
+                chess_color_to_dto(self.seat_colors[0]),
+                chess_color_to_dto(self.seat_colors[1]),
+            ],
+            turn_number: self.turn_number,
+            moves: self.game.move_history().to_vec(),
+            last_move: self.game.last_move().map(|m| [m.from.raw(), m.to.raw()]),
+            in_check,
+            check_square,
+            legal_moves: self
+                .game
+                .legal_moves()
+                .iter()
+                .copied()
+                .map(chess_move_to_dto)
+                .collect(),
+            captured_by_white: chess_captured_to_strings(
+                self.game.captured_by_white(),
+                ChessColor::Black,
+            ),
+            captured_by_black: chess_captured_to_strings(
+                self.game.captured_by_black(),
+                ChessColor::White,
+            ),
+            settings: self.settings,
+            clocks_ms: self.clocks_ms,
+            turn_ms_left: self.turn_ms_left,
+            draw_offered_by: self.draw_offered_by.map(seat_to_dto),
+            bot_thinking,
+            outcome: self
+                .game
+                .outcome()
+                .map(|o| chess_outcome_to_dto(o, self.seat_colors)),
+        }
+    }
+
+    /// Extracts terminal persistence summary if the match ended.
+    #[must_use]
+    pub fn finish_info(&self) -> Option<MatchFinishInfo> {
+        let outcome = self.game.outcome()?;
+        let activity_count = u32::try_from(self.game.move_history().len()).unwrap_or(u32::MAX);
+        match outcome {
+            ChessOutcome::Win { winner, reason } => {
+                let [seat_one_color, _] = self.seat_colors;
+                let (winner_i16, winner_seat) = if seat_one_color as u8 == winner as u8 {
+                    (1, SeatDto::One)
+                } else {
+                    (2, SeatDto::Two)
+                };
+                let reason_str = match reason {
+                    ChessWinReason::Checkmate => "checkmate",
+                    ChessWinReason::Resign => "resign",
+                    ChessWinReason::Timeout => "timeout",
+                };
+                Some(MatchFinishInfo {
+                    winner: Some(winner_i16),
+                    winner_seat: Some(winner_seat),
+                    reason: reason_str.to_owned(),
+                    activity_count,
+                })
+            }
+            ChessOutcome::Draw { reason } => {
+                let reason_str = match reason {
+                    ChessDrawReason::Stalemate => "stalemate",
+                    ChessDrawReason::Agreement => "agreement",
+                    ChessDrawReason::ThreefoldRepetition => "threefold_repetition",
+                    ChessDrawReason::FiftyMoveRule => "fifty_move_rule",
+                    ChessDrawReason::InsufficientMaterial => "insufficient_material",
+                };
+                Some(MatchFinishInfo {
+                    winner: None,
+                    winner_seat: None,
+                    reason: reason_str.to_owned(),
+                    activity_count,
+                })
+            }
+        }
+    }
+}
+
 /// Request dispatched onto the bounded `spawn_blocking` AI worker pool.
 pub enum BotWorkRequest {
     /// Compute the next Checkers move from a snapshot of the board.
@@ -543,6 +814,15 @@ pub enum BotWorkRequest {
     Pool {
         /// Game snapshot.
         game: Box<PoolGame>,
+        /// Bot difficulty.
+        level: BotLevelDto,
+        /// Deterministic seed.
+        seed: u64,
+    },
+    /// Compute the next Chess move from a snapshot of the position.
+    Chess {
+        /// Position snapshot.
+        position: Box<ChessPosition>,
         /// Bot difficulty.
         level: BotLevelDto,
         /// Deterministic seed.
@@ -574,6 +854,17 @@ pub fn spawn_bot_turn(
                 let mut search = PoolSearch::new(&game, domain_level, seed);
                 let shot = search.run_to_completion();
                 Some(BotDecision::PoolShot(pool_shot_to_dto(turn, shot)))
+            }
+            BotWorkRequest::Chess {
+                position,
+                level,
+                seed,
+            } => {
+                let domain_level: BotLevel = bot_level_from_dto(level);
+                let mut search = ChessSearch::new(&position, domain_level, seed);
+                search
+                    .run_to_completion()
+                    .map(|mv| BotDecision::ChessMove(mv.to_uci()))
             }
         })
         .await

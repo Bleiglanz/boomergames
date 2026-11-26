@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{HighscoreRowDto, ProfileGameStatDto, ProfileMatchDto, RoomSummaryDto, UserDto};
 use crate::checkers::{CheckersSettingsDto, CheckersStateDto};
+use crate::chess::{ChessSettingsDto, ChessStateDto};
 use crate::lobby::{
     ChatLineDto, ChatScopeDto, GameOverDto, InviteCloseReasonDto, KickReasonDto, LobbySnapshotDto,
     TableRoleDto, TableSettingsDto, TableSnapshotDto, TableSummaryDto, TableUpdateDto,
@@ -21,6 +22,8 @@ pub enum GameKindDto {
     Checkers,
     /// Standard WPA/BCA 8-ball pool.
     Pool,
+    /// Standard FIDE Chess.
+    Chess,
 }
 
 /// Wire representation of a player seat (`1` or `2`).
@@ -139,6 +142,20 @@ pub enum ClientMessage {
     CheckersSettings {
         /// Updated clock settings.
         settings: CheckersSettingsDto,
+    },
+    /// Submit a Chess move in UCI coordinate notation (`e2e4`, `e7e8q`).
+    #[serde(rename = "chess.move")]
+    ChessMove {
+        /// Expected turn number.
+        turn: u32,
+        /// UCI move string.
+        uci: String,
+    },
+    /// Update Chess clock settings (applies immediately to a fresh match).
+    #[serde(rename = "chess.settings")]
+    ChessSettings {
+        /// Updated clock settings.
+        settings: ChessSettingsDto,
     },
     /// Submit a Pool shot.
     #[serde(rename = "pool.shoot")]
@@ -555,6 +572,12 @@ pub enum ServerMessage {
     CheckersSnapshot {
         /// Complete Checkers state.
         state: CheckersStateDto,
+    },
+    /// Authoritative Chess state snapshot.
+    #[serde(rename = "chess.snapshot")]
+    ChessSnapshot {
+        /// Complete Chess state.
+        state: ChessStateDto,
     },
     /// Authoritative Pool state snapshot (join, reconnect, placement, clock, or rematch).
     #[serde(rename = "pool.snapshot")]

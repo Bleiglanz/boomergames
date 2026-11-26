@@ -9,6 +9,7 @@ export interface UserPrefs {
   readonly musicEnabled: boolean;
   readonly musicTrack: number;
   readonly checkersShowNumbers: boolean;
+  readonly chessShowCoords: boolean;
 }
 
 const STORAGE_KEY = "boomergames.prefs.v1";
@@ -21,6 +22,7 @@ const DEFAULT_PREFS: UserPrefs = {
   musicEnabled: false,
   musicTrack: 0,
   checkersShowNumbers: false,
+  chessShowCoords: true,
 };
 
 function clampVolume(raw: unknown): number {
@@ -48,6 +50,7 @@ export function loadPrefs(): UserPrefs {
           ? parsed.musicTrack
           : 0,
       checkersShowNumbers: parsed.checkersShowNumbers === true,
+      chessShowCoords: parsed.chessShowCoords !== false,
     };
   } catch {
     return DEFAULT_PREFS;
