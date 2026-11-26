@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use boomer_protocol::{ChatLineDto, ChatScopeDto, GameKindDto, RoomSummaryDto, ServerMessage};
 use chrono::Utc;
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::actors::lobby_actor::{LobbyActor, LobbyHandle};
 use crate::actors::table_actor::TableHandle;
@@ -61,6 +61,8 @@ pub struct LobbyHub {
     matches: Arc<dyn MatchRepo>,
     bot_semaphore: Arc<Semaphore>,
     draining: AtomicBool,
+    shutting_down: AtomicBool,
+    shutdown_notify: Notify,
     disconnect_grace: RwLock<Duration>,
     abandon_history: RwLock<HashMap<String, Vec<Instant>>>,
     abandon_cooldown_until: RwLock<HashMap<String, Instant>>,
@@ -111,6 +113,8 @@ impl LobbyHub {
             matches,
             bot_semaphore: Arc::new(Semaphore::new(BOT_WORKER_PERMITS)),
             draining: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
+            shutdown_notify: Notify::new(),
             disconnect_grace: RwLock::new(DEFAULT_DISCONNECT_GRACE),
             abandon_history: RwLock::new(HashMap::new()),
             abandon_cooldown_until: RwLock::new(HashMap::new()),
@@ -375,6 +379,37 @@ impl LobbyHub {
         {
             sink.force_disconnect();
         }
+    }
+
+    /// Returns `true` once final server shutdown has started and all sockets must close.
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Resolves immediately if shutting down, or waits until [`Self::disconnect_all_clients`] runs.
+    pub async fn shutdown_notified(&self) {
+        let notified = self.shutdown_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_shutting_down() {
+            return;
+        }
+        notified.await;
+    }
+
+    /// Marks the hub as shutting down and cleanly disconnects every registered WebSocket client
+    /// so `axum::serve` exits promptly after drain completes instead of waiting on idle sockets.
+    pub fn disconnect_all_clients(&self) -> usize {
+        self.shutting_down.store(true, Ordering::Release);
+        self.shutdown_notify.notify_waiters();
+        if let Ok(guard) = self.connected_sinks.read() {
+            for sink in guard.values() {
+                sink.force_disconnect();
+            }
+            return guard.len();
+        }
+        0
     }
 
     /// Records a disconnect-forfeit abandonment strike; after 3 in 1 hour applies a 5-min cooldown.

@@ -153,8 +153,32 @@ function createWoodFloorTexture(): THREE.CanvasTexture {
 
 const SLINGSHOT_CANCEL_RADIUS = 0.06;
 const SLINGSHOT_MAX_PULL = 0.62;
+const POCKET_DROP_MS = 180;
+const POCKET_CAPTURE_DIST = 0.16;
 const ROLL_AXIS = new THREE.Vector3();
 const ROLL_QUAT = new THREE.Quaternion();
+
+interface PocketDropAnim {
+  active: boolean;
+  startMs: number;
+  startX: number;
+  startY: number;
+  pocketX: number;
+  pocketY: number;
+}
+
+function findNearestPocket(x: number, y: number): readonly [number, number] | null {
+  let best: readonly [number, number] | null = null;
+  let bestDist = POCKET_CAPTURE_DIST;
+  for (const coord of POCKET_COORDS) {
+    const d = Math.hypot(x - coord[0], y - coord[1]);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = coord;
+    }
+  }
+  return best;
+}
 
 export class PoolScene {
   public readonly root = new THREE.Group();
@@ -162,6 +186,7 @@ export class PoolScene {
   private readonly ballMeshes: THREE.Mesh[] = [];
   private readonly ballShadows: THREE.Mesh[] = [];
   private readonly lastBallPos: { x: number; y: number; initialized: boolean }[] = [];
+  private readonly pocketDrops: PocketDropAnim[] = [];
   private readonly cueGroup = new THREE.Group();
   private readonly cueStick = new THREE.Group();
   private readonly aimLine: THREE.Line;
@@ -239,6 +264,14 @@ export class PoolScene {
       this.ballShadows.push(shadow);
 
       this.lastBallPos.push({ x: 0, y: 0, initialized: false });
+      this.pocketDrops.push({
+        active: false,
+        startMs: 0,
+        startX: 0,
+        startY: 0,
+        pocketX: 0,
+        pocketY: 0,
+      });
     }
 
     // Real 3D tapered wooden cue stick (cylinders oriented along -X)
@@ -374,6 +407,17 @@ export class PoolScene {
     return this.slingshotActive || this.draggingCueBall;
   }
 
+  public getCueAimState(): { readonly x: number; readonly y: number; readonly angle: number } | null {
+    if (this.currentView === null) {
+      return null;
+    }
+    return {
+      x: this.cueWorldX,
+      y: this.cueWorldY,
+      angle: this.currentView.aimAngle,
+    };
+  }
+
   /**
    * Smoothly blends between flat 2D top-down lighting (`blend = 0`) and rich 3D pool-hall
    * lighting + floor backdrop (`blend = 1`) as the player tilts the fullscreen camera.
@@ -485,21 +529,34 @@ export class PoolScene {
     }
   }
 
-  public syncBallsFromBuffer(frame: Float64Array): void {
+  public syncBallsFromBuffer(frame: Float64Array, nowMs = performance.now()): void {
+    // Detect whole-table resets/re-racks so bulk disappearances do not trigger pocket drops.
+    let newlyHidden = 0;
+    for (let i = 0; i < BALL_COUNT; i += 1) {
+      const prev = this.lastBallPos[i];
+      const visible = (frame[i * BALL_STRIDE + 3] ?? 0) > 0.5;
+      if (prev !== undefined && prev.initialized && !visible) {
+        newlyHidden += 1;
+      }
+    }
+    const allowDrop = newlyHidden <= 4;
+
     for (let i = 0; i < BALL_COUNT; i += 1) {
       const mesh = this.ballMeshes[i];
       const shadow = this.ballShadows[i];
       const prev = this.lastBallPos[i];
-      if (mesh === undefined || shadow === undefined || prev === undefined) {
+      const drop = this.pocketDrops[i];
+      if (mesh === undefined || shadow === undefined || prev === undefined || drop === undefined) {
         continue;
       }
       const base = i * BALL_STRIDE;
       const x = frame[base + 1] ?? 0;
       const y = frame[base + 2] ?? 0;
       const visible = (frame[base + 3] ?? 0) > 0.5;
-      mesh.visible = visible;
-      shadow.visible = visible;
       if (visible) {
+        drop.active = false;
+        mesh.visible = true;
+        shadow.visible = true;
         if (prev.initialized) {
           const dx = x - prev.x;
           const dy = y - prev.y;
@@ -526,7 +583,49 @@ export class PoolScene {
           this.cueWorldY = y;
         }
       } else {
-        prev.initialized = false;
+        if (prev.initialized) {
+          if (allowDrop) {
+            const pocket = findNearestPocket(prev.x, prev.y);
+            if (pocket !== null) {
+              drop.active = true;
+              drop.startMs = nowMs;
+              drop.startX = prev.x;
+              drop.startY = prev.y;
+              drop.pocketX = pocket[0];
+              drop.pocketY = pocket[1];
+            }
+          }
+          prev.initialized = false;
+        }
+
+        if (drop.active) {
+          const t = Math.max(0, Math.min(1, (nowMs - drop.startMs) / POCKET_DROP_MS));
+          if (t >= 1) {
+            drop.active = false;
+            mesh.visible = false;
+            shadow.visible = false;
+          } else {
+            // Purely visual drop-down into the recessed pocket chute (zero physics change).
+            const pull = t * 0.72;
+            const bx = drop.startX + (drop.pocketX - drop.startX) * pull;
+            const by = drop.startY + (drop.pocketY - drop.startY) * pull;
+            const bz = BALL_RADIUS - t * t * (BALL_RADIUS + 0.055);
+            const pdx = drop.pocketX - drop.startX;
+            const pdy = drop.pocketY - drop.startY;
+            const pdist = Math.hypot(pdx, pdy);
+            if (pdist > 1e-4) {
+              ROLL_AXIS.set(-pdy / pdist, pdx / pdist, 0);
+              ROLL_QUAT.setFromAxisAngle(ROLL_AXIS, 0.06);
+              mesh.quaternion.premultiply(ROLL_QUAT);
+            }
+            mesh.position.set(bx, by, bz);
+            mesh.visible = true;
+            shadow.visible = false;
+          }
+        } else {
+          mesh.visible = false;
+          shadow.visible = false;
+        }
       }
     }
   }
@@ -555,9 +654,10 @@ export class PoolScene {
     }
 
     // 2. If ball-in-hand and grabbing directly on the cue ball, drag cue ball placement.
+    const grabRadius = this.visual3DBlend > 0.3 ? 0.075 : 0.06;
     if (
       view.state.ballInHand &&
-      Math.hypot(worldX - this.cueWorldX, worldY - this.cueWorldY) <= 0.06
+      Math.hypot(worldX - this.cueWorldX, worldY - this.cueWorldY) <= grabRadius
     ) {
       this.draggingCueBall = true;
       this.callbacks.onPreviewCue(worldX, worldY);

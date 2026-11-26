@@ -504,3 +504,72 @@ async fn load_test_200_concurrent_users_stay_healthy_and_auto_open_rooms() {
         let _ = ws.close(None).await;
     }
 }
+
+#[tokio::test]
+async fn graceful_shutdown_disconnects_idle_ws_clients_immediately() {
+    let repos = Arc::new(MemoryRepos::new());
+    let mailer = Arc::new(CaptureMailSender::default());
+    let google = Arc::new(TestGoogleVerifier);
+    let signer = Arc::new(TokenSigner::new(b"graceful-shutdown-test-secret!!!"));
+    let state = AppState::new(
+        ServerConfig::default(),
+        signer,
+        repos.clone(),
+        repos.clone(),
+        repos.clone(),
+        repos.clone(),
+        repos.clone(),
+        mailer,
+        google,
+    );
+    let drain_hub = Arc::clone(&state.hub);
+    let router = build_router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ws_url = format!("ws://{addr}/ws");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let serve_handle = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+                drain_hub.begin_drain();
+                drain_hub.disconnect_all_clients();
+            })
+            .await
+            .unwrap();
+    });
+
+    // 1. An authenticated client sitting idle in a lounge room.
+    let mut idle_ws = spawn_load_client(ws_url.clone(), "pool-social-1").await;
+    // 2. A raw WebSocket connected prior to completing Hello handshake.
+    let (mut pre_hello_ws, _) = connect_async(&ws_url).await.unwrap();
+
+    // Trigger graceful shutdown -> server must disconnect both clients and exit promptly!
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), serve_handle)
+        .await
+        .expect("axum::serve hung waiting on idle WebSocket clients")
+        .unwrap();
+
+    // Both clients observe clean closure (Close frame or EOF) quickly.
+    let closed_idle = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(frame) = idle_ws.next().await {
+            if matches!(frame, Ok(WsMsg::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed_idle.is_ok(), "idle client was not disconnected");
+
+    let closed_pre = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(frame) = pre_hello_ws.next().await {
+            if matches!(frame, Ok(WsMsg::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(closed_pre.is_ok(), "pre-hello client was not disconnected");
+}

@@ -124,6 +124,29 @@ export interface HighscoreRowDto {
   readonly games: number;
 }
 
+export interface ProfileGameStatDto {
+  readonly game: GameKindDto;
+  readonly rating: number;
+  readonly games: number;
+  readonly wins: number;
+  readonly losses: number;
+  readonly draws: number;
+}
+
+export interface ProfileMatchDto {
+  readonly game: GameKindDto;
+  readonly opp: string;
+  readonly result: string;
+  readonly ts: number;
+}
+
+export interface PlayerProfileDto {
+  readonly user: UserDto;
+  readonly since: number;
+  readonly stats: readonly ProfileGameStatDto[];
+  readonly last: readonly ProfileMatchDto[];
+}
+
 export type ConnectionStatus = "idle" | "probing" | "offline_host" | "connecting" | "connected";
 
 export interface OnlineState {
@@ -141,6 +164,7 @@ export interface OnlineState {
   pendingInvites: PendingInviteView[];
   playNowState: "idle" | "queued" | "suggest_bot";
   highscores: { game: GameKindDto; rows: HighscoreRowDto[] } | null;
+  activeProfile: PlayerProfileDto | null;
   authNotice: string | null;
   isNewAccount: boolean;
   needsNicknameReview: boolean;
@@ -205,6 +229,7 @@ export class OnlineSession {
     pendingInvites: [],
     playNowState: "idle",
     highscores: null,
+    activeProfile: null,
     authNotice: null,
     isNewAccount: false,
     needsNicknameReview: false,
@@ -467,6 +492,12 @@ export class OnlineSession {
 
   fetchHighscores(game: GameKindDto, around = false): void {
     this.send("highscores.get", { game, around });
+  }
+
+  fetchProfile(userId: string): void {
+    this.state.activeProfile = null;
+    this.send("profile.get", { userId });
+    this.notify();
   }
 
   clearError(): void {
@@ -774,6 +805,10 @@ export class OnlineSession {
           game: d.game as GameKindDto,
           rows: (d.rows as HighscoreRowDto[] | undefined) ?? [],
         };
+        break;
+      }
+      case "profile": {
+        this.state.activeProfile = d as unknown as PlayerProfileDto;
         break;
       }
       case "error": {

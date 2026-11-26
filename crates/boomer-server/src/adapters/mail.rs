@@ -10,6 +10,7 @@ use crate::ports::{BoxFuture, MailSender, PortError};
 
 /// Production SMTP magic-link sender using `lettre` over STARTTLS (port 587).
 pub struct LettreMailSender {
+    host: String,
     from: Mailbox,
     transport: AsyncSmtpTransport<Tokio1Executor>,
 }
@@ -35,6 +36,7 @@ impl LettreMailSender {
         }
 
         Ok(Self {
+            host: cfg.host.clone(),
             from,
             transport: builder.build(),
         })
@@ -49,6 +51,7 @@ impl MailSender for LettreMailSender {
     ) -> BoxFuture<'_, Result<(), PortError>> {
         let to_email = to_email.to_owned();
         let login_url = login_url.to_owned();
+        let host = self.host.clone();
         Box::pin(async move {
             let to: Mailbox = to_email
                 .parse()
@@ -70,6 +73,15 @@ impl MailSender for LettreMailSender {
                 .send(email)
                 .await
                 .map_err(|err| PortError::Unavailable(format!("SMTP send failed: {err}")))?;
+
+            let recipient_domain = to_email
+                .rsplit_once('@')
+                .map_or("unknown", |(_, domain)| domain);
+            info!(
+                smtp_host = %host,
+                recipient_domain = %recipient_domain,
+                "dispatched magic-link email"
+            );
             Ok(())
         })
     }

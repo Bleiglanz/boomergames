@@ -252,6 +252,7 @@ interface InlineTableChat {
 interface MountedShell {
   readonly game: GameKindDto;
   readonly stage: StageRenderer;
+  readonly boardCol: HTMLElement;
   readonly canvasHost: HTMLElement;
   readonly bannerHost: HTMLElement;
   readonly playersHost: HTMLElement;
@@ -301,6 +302,40 @@ async function bootstrap(): Promise<void> {
   let contrastBtnRef: HTMLButtonElement | null = null;
   let lastAnnouncement = "";
   let poolFullscreen = false;
+  let checkersFullscreen = false;
+
+  const setCheckersFullscreen = (enabled: boolean): void => {
+    const shell = mountedShell;
+    if (shell === null || shell.game !== "checkers") {
+      checkersFullscreen = false;
+      return;
+    }
+    if (checkersFullscreen === enabled) {
+      return;
+    }
+    checkersFullscreen = enabled;
+    const fsRoot = shell.boardCol;
+    fsRoot.classList.toggle("checkers-fullscreen-active", enabled);
+
+    if (enabled) {
+      if (document.fullscreenElement === null && typeof fsRoot.requestFullscreen === "function") {
+        void fsRoot.requestFullscreen().catch(() => {
+          // Graceful CSS fixed-viewport fullscreen fallback when browser blocks native fullscreen.
+        });
+      }
+    } else if (document.fullscreenElement === fsRoot && typeof document.exitFullscreen === "function") {
+      void document.exitFullscreen().catch(() => {
+        // Ignore already-exited fullscreen state.
+      });
+    }
+
+    renderApp();
+    window.requestAnimationFrame(() => {
+      if (mountedShell !== null) {
+        mountedShell.stage.resize(mountedShell.canvasHost);
+      }
+    });
+  };
 
   const setPoolFullscreen = (enabled: boolean): void => {
     const shell = mountedShell;
@@ -346,6 +381,9 @@ async function bootstrap(): Promise<void> {
   document.addEventListener("fullscreenchange", () => {
     if (poolFullscreen && document.fullscreenElement === null) {
       setPoolFullscreen(false);
+    }
+    if (checkersFullscreen && document.fullscreenElement === null) {
+      setCheckersFullscreen(false);
     }
   });
 
@@ -495,8 +533,9 @@ async function bootstrap(): Promise<void> {
   };
 
   const disposeShell = (): void => {
-    if (poolFullscreen) {
+    if (poolFullscreen || checkersFullscreen) {
       poolFullscreen = false;
+      checkersFullscreen = false;
       if (document.fullscreenElement !== null && typeof document.exitFullscreen === "function") {
         void document.exitFullscreen().catch(() => {});
       }
@@ -550,6 +589,8 @@ async function bootstrap(): Promise<void> {
         announce,
         onlineMatch?.table ?? null,
         onlineSession,
+        checkersFullscreen,
+        () => setCheckersFullscreen(!checkersFullscreen),
       );
       return;
     }
@@ -713,6 +754,9 @@ async function bootstrap(): Promise<void> {
 
         const fsBar = document.createElement("div");
         fsBar.className = "pool-fs-bar";
+        const behindCueBtn = makeButton(s.poolBehindCueBtn, () => {
+          mountedShell?.stage.setBehindCueCamera();
+        });
         const reset2DBtn = makeButton(s.poolReset2DBtn, () => {
           mountedShell?.stage.resetCamera2D();
         });
@@ -723,7 +767,7 @@ async function bootstrap(): Promise<void> {
           () => setPoolFullscreen(false),
           { primary: true },
         );
-        fsBar.append(reset2DBtn, exitFsBtn);
+        fsBar.append(behindCueBtn, reset2DBtn, exitFsBtn);
         boardCol.append(fsBar);
 
         const stageRow = document.createElement("div");
@@ -758,7 +802,15 @@ async function bootstrap(): Promise<void> {
         fsHint.textContent = s.poolFullscreenHint;
         boardCol.append(fsHint);
       } else {
-        boardCol.append(frame);
+        const checkersFsBar = document.createElement("div");
+        checkersFsBar.className = "checkers-fs-bar";
+        const exitCheckersFsBtn = makeButton(
+          s.poolExitFullscreenBtn,
+          () => setCheckersFullscreen(false),
+          { primary: true },
+        );
+        checkersFsBar.append(exitCheckersFsBtn);
+        boardCol.append(checkersFsBar, frame);
       }
 
       shell.append(boardCol, sidePanelHost);
@@ -795,6 +847,7 @@ async function bootstrap(): Promise<void> {
       mountedShell = {
         game: vm.screen.game,
         stage,
+        boardCol,
         canvasHost: frame,
         bannerHost,
         playersHost,
@@ -810,6 +863,8 @@ async function bootstrap(): Promise<void> {
         announce,
         onlineMatch?.table ?? null,
         onlineSession,
+        checkersFullscreen,
+        () => setCheckersFullscreen(!checkersFullscreen),
       );
     }
 
@@ -835,17 +890,31 @@ async function bootstrap(): Promise<void> {
     }
   });
 
-  // Pool keyboard controls: Left/Right aim (Shift = fine), Up/Down power, Space shoot
+  // Keyboard controls: Checkers fullscreen (F/Esc) & Pool aim/power/shoot/3D camera
   window.addEventListener("keydown", (ev) => {
-    if (mountedShell?.game !== "pool") {
-      return;
-    }
     const target = ev.target;
     const isNativeControl =
       target instanceof HTMLButtonElement ||
       target instanceof HTMLSelectElement ||
       target instanceof HTMLTextAreaElement ||
       (target instanceof HTMLInputElement && target.type !== "range");
+
+    if (mountedShell?.game === "checkers") {
+      if (isNativeControl || target instanceof HTMLInputElement) {
+        return;
+      }
+      if ((ev.key === "f" || ev.key === "F") && !ev.repeat) {
+        ev.preventDefault();
+        setCheckersFullscreen(!checkersFullscreen);
+      } else if (checkersFullscreen && ev.key === "Escape") {
+        setCheckersFullscreen(false);
+      }
+      return;
+    }
+
+    if (mountedShell?.game !== "pool") {
+      return;
+    }
 
     if (ev.code === "Space" || ev.key === " ") {
       if (!ev.repeat && !isNativeControl) {
@@ -868,6 +937,11 @@ async function bootstrap(): Promise<void> {
     if (poolFullscreen) {
       if (ev.key === "Escape") {
         setPoolFullscreen(false);
+        return;
+      }
+      if ((ev.key === "c" || ev.key === "C") && !ev.repeat) {
+        ev.preventDefault();
+        mountedShell.stage.setBehindCueCamera();
         return;
       }
       if (ev.key === "w" || ev.key === "W") {
@@ -938,6 +1012,7 @@ async function bootstrap(): Promise<void> {
     if (mountedShell !== null) {
       mountedShell.stage.render(
         mountedShell.game === "pool" ? current.poolFrame(now) : undefined,
+        now,
       );
     }
     window.requestAnimationFrame(loop);
@@ -1312,6 +1387,8 @@ function updateGameShellInPlace(
   announce: (text: string) => void,
   onlineTable: TableSnapshotDto | null,
   onlineSession: OnlineSession,
+  checkersFullscreen: boolean,
+  onToggleCheckersFullscreen: () => void,
 ): void {
   if (vm.screen.kind !== "game_shell") {
     return;
@@ -1343,7 +1420,18 @@ function updateGameShellInPlace(
   if (vm.screen.game === "checkers" && vm.screen.checkers !== null) {
     const view = vm.screen.checkers;
     shell.stage.syncCheckers(view);
-    renderCheckersHud(shell, vm, view, vm.screen.mode, s, dispatch, announce, onlineTable);
+    renderCheckersHud(
+      shell,
+      vm,
+      view,
+      vm.screen.mode,
+      s,
+      dispatch,
+      announce,
+      onlineTable,
+      checkersFullscreen,
+      onToggleCheckersFullscreen,
+    );
     return;
   }
 
@@ -1572,6 +1660,8 @@ function renderCheckersHud(
   dispatch: (input: UiInput) => void,
   announce: (text: string) => void,
   onlineTable: TableSnapshotDto | null,
+  checkersFullscreen: boolean,
+  onToggleCheckersFullscreen: () => void,
 ): void {
   const st = view.state;
   const isOnline = onlineTable !== null;
@@ -1715,6 +1805,11 @@ function renderCheckersHud(
     makeButton(s.showNumbers, () => dispatch({ kind: "checkers_toggle_square_numbers" }), {
       active: view.showSquareNumbers,
     }),
+    makeButton(
+      checkersFullscreen ? s.poolExitFullscreenBtn : s.poolFullscreenBtn,
+      onToggleCheckersFullscreen,
+      { active: checkersFullscreen },
+    ),
   );
 
   shell.sideControlsHost.append(heading, modeBox);

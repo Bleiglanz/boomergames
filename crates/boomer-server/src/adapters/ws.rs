@@ -145,6 +145,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     });
 
+    if state.hub.is_shutting_down() {
+        let _ = out_tx.try_send(Message::Close(None));
+        drop(out_tx);
+        let _ = writer.await;
+        return;
+    }
+
     let Some(mut session) = perform_handshake(
         &mut ws_rx,
         out_tx.clone(),
@@ -161,8 +168,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     };
 
     state.hub.register_connection(session.sink.clone());
-    attempt_table_reconnect(&mut session, &state).await;
-    run_message_loop(&mut ws_rx, &mut session, &state).await;
+    if state.hub.is_shutting_down() {
+        session.sink.force_disconnect();
+    } else {
+        attempt_table_reconnect(&mut session, &state).await;
+        run_message_loop(&mut ws_rx, &mut session, &state).await;
+    }
     cleanup_session(&session, &state, true);
 
     let _ = out_tx.try_send(Message::Close(None));
@@ -302,10 +313,10 @@ async fn perform_handshake(
     disconnect_notify: Arc<Notify>,
     state: &AppState,
 ) -> Option<ConnSession> {
-    let first = tokio::time::timeout(Duration::from_secs(10), ws_rx.next())
-        .await
-        .ok()??
-        .ok()?;
+    let first = tokio::select! {
+        () = state.hub.shutdown_notified() => return None,
+        res = tokio::time::timeout(Duration::from_secs(10), ws_rx.next()) => res.ok()??.ok()?,
+    };
     let Message::Text(text) = first else {
         return None;
     };

@@ -67,6 +67,7 @@ export interface Strings {
   readonly poolShootBtn: string;
   readonly poolFullscreenBtn: string;
   readonly poolExitFullscreenBtn: string;
+  readonly poolBehindCueBtn: string;
   readonly poolReset2DBtn: string;
   readonly poolFullscreenHint: string;
   readonly poolRerackBtn: string;
@@ -166,6 +167,13 @@ export interface Strings {
   readonly loungeCreateConfirm: string;
   readonly loungeFindMe: string;
   readonly loungeNoHighscores: string;
+  readonly loungeProfileTitle: string;
+  readonly loungeProfileLoading: string;
+  readonly loungeProfileSince: string;
+  readonly loungeProfileStats: string;
+  readonly loungeProfileRecent: string;
+  readonly loungeProfileNoMatches: string;
+  readonly loungeProfileView: string;
   // Live Online Match strings
   readonly onlineBadge: string;
   readonly onlineMatch: string;
@@ -243,8 +251,9 @@ const EN: Strings = {
   poolShootBtn: "Shoot! (Space)",
   poolFullscreenBtn: "⛶ Full Screen (F)",
   poolExitFullscreenBtn: "✕ Exit Full Screen",
+  poolBehindCueBtn: "🎯 Behind Cue (C)",
   poolReset2DBtn: "↺ Top-Down 2D",
-  poolFullscreenHint: "Left-drag: shoot · Right-drag / Shift+drag / Scroll / WASD: view · F: exit",
+  poolFullscreenHint: "Left-drag: shoot · Right/Shift-drag / Scroll / WASD: view · C: cue cam · R: 2D · F: exit",
   poolRerackBtn: "Re-Rack Table",
   poolSpinLabel: "English (Spin)",
   poolSpinCenter: "Center",
@@ -343,6 +352,13 @@ const EN: Strings = {
   loungeCreateConfirm: "Create Table",
   loungeFindMe: "Find Me",
   loungeNoHighscores: "No ranked human wins recorded yet.",
+  loungeProfileTitle: "Player Profile",
+  loungeProfileLoading: "Loading player profile…",
+  loungeProfileSince: "Member since",
+  loungeProfileStats: "Ratings & Record",
+  loungeProfileRecent: "Recent Matches",
+  loungeProfileNoMatches: "No finished matches recorded yet.",
+  loungeProfileView: "Profile",
   onlineBadge: "Online",
   onlineMatch: "Online Match",
   yourTurnBanner: "Your turn!",
@@ -419,8 +435,9 @@ const DE: Strings = {
   poolShootBtn: "Stoß! (Leertaste)",
   poolFullscreenBtn: "⛶ Vollbild (F)",
   poolExitFullscreenBtn: "✕ Vollbild beenden",
+  poolBehindCueBtn: "🎯 Queue-Sicht (C)",
   poolReset2DBtn: "↺ 2D Draufsicht",
-  poolFullscreenHint: "Links ziehen: Stoß · Rechts/Shift ziehen / Rad / WASD: Ansicht · F: zurück",
+  poolFullscreenHint: "Links ziehen: Stoß · Rechts/Shift / Rad / WASD: Ansicht · C: Queue · R: 2D · F: zurück",
   poolRerackBtn: "Neu aufbauen",
   poolSpinLabel: "Effet (Spin)",
   poolSpinCenter: "Mitte",
@@ -519,6 +536,13 @@ const DE: Strings = {
   loungeCreateConfirm: "Tisch eröffnen",
   loungeFindMe: "Finde mich",
   loungeNoHighscores: "Noch keine gewerteten Siege gegen Menschen.",
+  loungeProfileTitle: "Spielerprofil",
+  loungeProfileLoading: "Lade Spielerprofil…",
+  loungeProfileSince: "Mitglied seit",
+  loungeProfileStats: "Wertungen & Bilanz",
+  loungeProfileRecent: "Letzte Partien",
+  loungeProfileNoMatches: "Noch keine abgeschlossenen Partien.",
+  loungeProfileView: "Profil",
   onlineBadge: "Online",
   onlineMatch: "Online-Partie",
   yourTurnBanner: "Du bist am Zug!",

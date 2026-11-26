@@ -24,6 +24,9 @@ const MIN_ZOOM = 0.65;
 const MAX_ZOOM = 2.35;
 const FELT_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), -BALL_RADIUS);
 const CHECKERS_PLANE = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const BG_POOL_2D = new THREE.Color(0x182b1c);
+const BG_POOL_3D = new THREE.Color(0x120d0a);
+const BG_POOL_WORK = new THREE.Color(0x182b1c);
 
 export class StageRenderer {
   private readonly renderer: THREE.WebGLRenderer;
@@ -49,9 +52,13 @@ export class StageRenderer {
   private camTilt = 0;
   private camAzimuth = 0;
   private camZoom = 1.0;
+  private camLookX = POOL_TABLE_WIDTH / 2;
+  private camLookY = POOL_TABLE_HEIGHT / 2;
   private targetTilt = 0;
   private targetAzimuth = 0;
   private targetZoom = 1.0;
+  private targetLookX = POOL_TABLE_WIDTH / 2;
+  private targetLookY = POOL_TABLE_HEIGHT / 2;
   private lastReported3D = false;
 
   // Orbit pointer tracking (right-drag, middle-drag, Shift+drag, or 2-finger touch)
@@ -267,9 +274,13 @@ export class StageRenderer {
       this.targetTilt = 0;
       this.targetAzimuth = 0;
       this.targetZoom = 1.0;
+      this.targetLookX = POOL_TABLE_WIDTH / 2;
+      this.targetLookY = POOL_TABLE_HEIGHT / 2;
       this.camTilt = 0;
       this.camAzimuth = 0;
       this.camZoom = 1.0;
+      this.camLookX = POOL_TABLE_WIDTH / 2;
+      this.camLookY = POOL_TABLE_HEIGHT / 2;
       this.poolScene.set3DVisualBlend(0);
       this.report3DState(false);
     }
@@ -280,6 +291,31 @@ export class StageRenderer {
     this.targetTilt = 0;
     this.targetAzimuth = 0;
     this.targetZoom = 1.0;
+    this.targetLookX = POOL_TABLE_WIDTH / 2;
+    this.targetLookY = POOL_TABLE_HEIGHT / 2;
+  }
+
+  public setBehindCueCamera(): void {
+    if (!this.poolFullscreen || this.activeGame !== "pool") {
+      return;
+    }
+    const aim = this.poolScene.getCueAimState();
+    if (aim === null) {
+      return;
+    }
+    // Forward XY vector is (-sin(azimuth), cos(azimuth)); align with (cos(angle), sin(angle)).
+    const desiredAzimuth = aim.angle - Math.PI / 2;
+    const shortestDelta =
+      ((((desiredAzimuth - this.camAzimuth + Math.PI) % (Math.PI * 2)) + Math.PI * 2) %
+        (Math.PI * 2)) -
+      Math.PI;
+    this.targetAzimuth = this.camAzimuth + shortestDelta;
+    this.targetTilt = 1.12; // ~64 deg cue-level sightline
+    this.targetZoom = 1.48;
+    const fx = Math.cos(aim.angle);
+    const fy = Math.sin(aim.angle);
+    this.targetLookX = Math.max(0.25, Math.min(POOL_TABLE_WIDTH - 0.25, aim.x + fx * 0.32));
+    this.targetLookY = Math.max(0.18, Math.min(POOL_TABLE_HEIGHT - 0.18, aim.y + fy * 0.32));
   }
 
   public nudgeCamera3D(dTilt: number, dAzimuth: number): void {
@@ -288,6 +324,8 @@ export class StageRenderer {
     }
     this.targetTilt = Math.max(0, Math.min(MAX_TILT_RAD, this.targetTilt + dTilt));
     this.targetAzimuth += dAzimuth;
+    this.targetLookX = POOL_TABLE_WIDTH / 2;
+    this.targetLookY = POOL_TABLE_HEIGHT / 2;
   }
 
   public syncCheckers(view: CheckersView): void {
@@ -307,10 +345,10 @@ export class StageRenderer {
     this.updateCameraProjection(this.lastAspect);
   }
 
-  public render(poolFrame?: Float64Array): void {
+  public render(poolFrame?: Float64Array, nowMs = performance.now()): void {
     if (this.activeGame === "pool") {
       if (poolFrame !== undefined) {
-        this.poolScene.syncBallsFromBuffer(poolFrame);
+        this.poolScene.syncBallsFromBuffer(poolFrame, nowMs);
       }
       this.stepCamera3D();
     }
@@ -345,6 +383,8 @@ export class StageRenderer {
   private applyOrbitDelta(dx: number, dy: number): void {
     this.targetAzimuth -= dx * 0.0065;
     this.targetTilt = Math.max(0, Math.min(MAX_TILT_RAD, this.targetTilt + dy * 0.0065));
+    this.targetLookX = POOL_TABLE_WIDTH / 2;
+    this.targetLookY = POOL_TABLE_HEIGHT / 2;
   }
 
   private applyZoomFactor(factor: number): void {
@@ -356,6 +396,8 @@ export class StageRenderer {
     this.camTilt += (this.targetTilt - this.camTilt) * smooth;
     this.camAzimuth += (this.targetAzimuth - this.camAzimuth) * smooth;
     this.camZoom += (this.targetZoom - this.camZoom) * smooth;
+    this.camLookX += (this.targetLookX - this.camLookX) * smooth;
+    this.camLookY += (this.targetLookY - this.camLookY) * smooth;
 
     if (this.targetTilt === 0 && this.camTilt < 0.003) {
       this.camTilt = 0;
@@ -372,20 +414,19 @@ export class StageRenderer {
 
     if (!in3D) {
       this.poolScene.set3DVisualBlend(0);
-      this.scene.background = new THREE.Color(0x182b1c);
+      this.scene.background = BG_POOL_2D;
       return;
     }
 
     // Smoothly blend lighting & pool-hall room backdrop as camera tilts off straight +Z
     const blend = Math.min(1, this.camTilt / 0.28);
     this.poolScene.set3DVisualBlend(blend);
-    const bg2D = new THREE.Color(0x182b1c);
-    const bg3D = new THREE.Color(0x120d0a);
-    this.scene.background = bg2D.lerp(bg3D, blend);
+    BG_POOL_WORK.copy(BG_POOL_2D).lerp(BG_POOL_3D, blend);
+    this.scene.background = BG_POOL_WORK;
 
     // Singularity-free spherical orbit matching the exact orthographic framing at tilt=0
-    const cx = POOL_TABLE_WIDTH / 2;
-    const cy = POOL_TABLE_HEIGHT / 2;
+    const cx = this.camLookX;
+    const cy = this.camLookY;
     const baseDist = this.orthoHalfH / Math.tan(THREE.MathUtils.degToRad(PERSP_FOV_DEG / 2));
     const dist = baseDist / this.camZoom;
 
@@ -419,6 +460,11 @@ export class StageRenderer {
     this.raycaster.setFromCamera(this.ndc, this.activeCamera());
     const plane = this.activeGame === "checkers" ? CHECKERS_PLANE : FELT_PLANE;
     if (this.raycaster.ray.intersectPlane(plane, this.hitPoint) !== null) {
+      if (this.activeGame === "pool") {
+        const clampedX = Math.max(-1.5, Math.min(POOL_TABLE_WIDTH + 1.5, this.hitPoint.x));
+        const clampedY = Math.max(-1.5, Math.min(POOL_TABLE_HEIGHT + 1.5, this.hitPoint.y));
+        return [clampedX, clampedY];
+      }
       return [this.hitPoint.x, this.hitPoint.y];
     }
     return [POOL_TABLE_WIDTH / 2, POOL_TABLE_HEIGHT / 2];

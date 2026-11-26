@@ -126,8 +126,10 @@ async fn graceful_drain_signal(hub: Arc<boomer_server::LobbyHub>) {
     while hub.games_count() > 0 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+    let disconnected = hub.disconnect_all_clients();
     info!(
         remaining_games = hub.games_count(),
+        disconnected_clients = disconnected,
         "drain complete; shutting down"
     );
 }

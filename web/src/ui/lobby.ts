@@ -31,7 +31,7 @@ const AVATAR_BADGES: readonly string[] = [
 
 type LoungeTab = "tables" | "players" | "chat";
 type TableTab = "table" | "chat" | "host";
-type ActiveModal = "none" | "create_table" | "account" | "highscores";
+type ActiveModal = "none" | "create_table" | "account" | "highscores" | "profile";
 
 interface GoogleCredentialResponse {
   readonly credential?: string;
@@ -281,6 +281,8 @@ export class LobbyController {
       shell.append(this.buildAccountModal());
     } else if (this.modal === "highscores") {
       shell.append(this.buildHighscoresModal());
+    } else if (this.modal === "profile") {
+      shell.append(this.buildProfileModal());
     }
 
     this.root.append(shell);
@@ -492,14 +494,25 @@ export class LobbyController {
 
       const info = document.createElement("div");
       info.className = "roster-info";
-      const name = document.createElement("div");
-      name.className = "roster-name";
-      name.textContent = `${avatarGlyph(u.avatar)} ${u.name}`;
+      const canViewProfile = !u.guest && !u.bot && u.id.startsWith("u");
+      if (canViewProfile) {
+        const nameBtn = document.createElement("button");
+        nameBtn.type = "button";
+        nameBtn.className = "roster-name profile-link-btn";
+        nameBtn.textContent = `${avatarGlyph(u.avatar)} ${u.name}`;
+        nameBtn.addEventListener("click", () => this.openProfile(u.id));
+        info.append(nameBtn);
+      } else {
+        const name = document.createElement("div");
+        name.className = "roster-name";
+        name.textContent = `${avatarGlyph(u.avatar)} ${u.name}`;
+        info.append(name);
+      }
       const sub = document.createElement("div");
       sub.className = "roster-sub";
       const ratingText = u.guest ? "Guest" : `${u.rating}${u.prov ? "?" : ""}`;
       sub.textContent = `${ratingText} · ${u.status}`;
-      info.append(name, sub);
+      info.append(sub);
 
       row.append(info);
 
@@ -1054,6 +1067,7 @@ export class LobbyController {
       row.className = "control-row";
       row.append(
         saveBtn,
+        makeBtn(s.loungeProfileView, () => this.openProfile(me.id)),
         makeBtn(s.loungeLogout, () => {
           this.modal = "none";
           this.session.logout();
@@ -1132,8 +1146,15 @@ export class LobbyController {
     } else {
       for (const row of hs.rows) {
         const line = document.createElement("div");
-        line.className = "move-row";
-        line.textContent = `#${row.rank} ${avatarGlyph(row.avatar)} ${row.name} — ${row.wins}W / ${row.games}G`;
+        line.className = "move-row profile-hs-row";
+        const nameBtn = document.createElement("button");
+        nameBtn.type = "button";
+        nameBtn.className = "profile-link-btn";
+        nameBtn.textContent = `#${row.rank} ${avatarGlyph(row.avatar)} ${row.name}`;
+        nameBtn.addEventListener("click", () => this.openProfile(row.id));
+        const stats = document.createElement("span");
+        stats.textContent = `${row.wins}W / ${row.games}G`;
+        line.append(nameBtn, stats);
         list.append(line);
       }
     }
@@ -1142,6 +1163,92 @@ export class LobbyController {
       h2,
       switchRow,
       list,
+      makeBtn(s.loungeCancel, () => {
+        this.modal = "none";
+        this.render();
+      }),
+    );
+    overlay.append(dialog);
+    return overlay;
+  }
+
+  private openProfile(userId: string): void {
+    this.modal = "profile";
+    this.session.fetchProfile(userId);
+  }
+
+  private buildProfileModal(): HTMLElement {
+    const s = this.strings;
+    const profile = this.session.state.activeProfile;
+
+    const overlay = document.createElement("div");
+    overlay.className = "modal-backdrop";
+
+    const dialog = document.createElement("div");
+    dialog.className = "modal-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const h2 = document.createElement("h2");
+    if (profile === null) {
+      h2.textContent = s.loungeProfileTitle;
+      const loading = document.createElement("p");
+      loading.className = "lounge-empty";
+      loading.textContent = s.loungeProfileLoading;
+      dialog.append(h2, loading);
+    } else {
+      h2.textContent = `${avatarGlyph(profile.user.avatar)} ${profile.user.name}`;
+      const since = document.createElement("div");
+      since.className = "roster-sub";
+      const sinceDate = new Date(profile.since).toLocaleDateString();
+      since.textContent = `${s.loungeProfileSince}: ${sinceDate}`;
+      dialog.append(h2, since);
+
+      const statsHeading = document.createElement("h3");
+      statsHeading.textContent = s.loungeProfileStats;
+      const statsGrid = document.createElement("div");
+      statsGrid.className = "profile-stats-grid";
+      const gameOrder: readonly GameKindDto[] = ["pool", "checkers"];
+      for (const gk of gameOrder) {
+        const st = profile.stats.find((x) => x.game === gk);
+        const card = document.createElement("div");
+        card.className = "table-row-card profile-stat-card";
+        const title = document.createElement("div");
+        title.className = "table-row-title";
+        title.textContent = gk === "pool" ? s.poolTitle : s.checkersTitle;
+        const val = document.createElement("div");
+        val.className = "table-row-badges";
+        if (st !== undefined) {
+          val.textContent = `Elo ${st.rating}${st.games < 10 ? "?" : ""} · ${st.wins}W / ${st.losses}L / ${st.draws}D (${st.games}G)`;
+        } else {
+          val.textContent = "Elo 1200? · 0W / 0L / 0D";
+        }
+        card.append(title, val);
+        statsGrid.append(card);
+      }
+      dialog.append(statsHeading, statsGrid);
+
+      const recentHeading = document.createElement("h3");
+      recentHeading.textContent = s.loungeProfileRecent;
+      const list = document.createElement("div");
+      list.className = "move-list";
+      if (profile.last.length === 0) {
+        list.textContent = s.loungeProfileNoMatches;
+      } else {
+        for (const m of profile.last) {
+          const row = document.createElement("div");
+          row.className = "move-row profile-match-row";
+          const gameLabel = m.game === "pool" ? "🎱" : "♟️";
+          const resBadge = m.result === "win" ? "W" : m.result === "loss" ? "L" : "D";
+          const dateStr = new Date(m.ts).toLocaleDateString();
+          row.textContent = `${gameLabel} [${resBadge}] vs ${m.opp} · ${dateStr}`;
+          list.append(row);
+        }
+      }
+      dialog.append(recentHeading, list);
+    }
+
+    dialog.append(
       makeBtn(s.loungeCancel, () => {
         this.modal = "none";
         this.render();
