@@ -188,6 +188,7 @@ export class PoolScene {
   private readonly lastBallPos: { x: number; y: number; initialized: boolean }[] = [];
   private readonly pocketDrops: PocketDropAnim[] = [];
   private readonly cueGroup = new THREE.Group();
+  private readonly cuePitchGroup = new THREE.Group();
   private readonly cueStick = new THREE.Group();
   private readonly aimLine: THREE.Line;
   private readonly objectLine: THREE.Line;
@@ -308,7 +309,8 @@ export class PoolScene {
     cueTip.position.set(-0.045, 0, 0);
 
     this.cueStick.add(cueShaft, cueButt, cueFerrule, cueTip);
-    this.cueGroup.add(this.cueStick);
+    this.cuePitchGroup.add(this.cueStick);
+    this.cueGroup.add(this.cuePitchGroup);
     this.cueGroup.visible = false;
     this.root.add(this.cueGroup);
 
@@ -431,9 +433,6 @@ export class PoolScene {
     this.fillLight.intensity = t * 0.65;
     this.overheadLight.intensity = t * 3.8;
     this.roomGroup.visible = t > 0.01;
-    // Elevate cue stick slightly over the 3D cushion rail when tilted
-    this.cueStick.rotation.y = -0.095 * t;
-    this.cueStick.position.z = 0.015 * t;
   }
 
   public syncView(view: PoolView): void {
@@ -493,13 +492,15 @@ export class PoolScene {
 
     const preview = view.aimPreview;
     this.cueGroup.visible = true;
-    this.cueGroup.position.set(preview.cuePos[0], preview.cuePos[1], BALL_RADIUS + 0.012);
+    // Anchor cue pivot at the exact cue-ball center (same z = BALL_RADIUS as aimLine) so the
+    // cue axis and white aim line meet cleanly at the ball with zero vertical parallax offset.
+    this.cueGroup.position.set(preview.cuePos[0], preview.cuePos[1], BALL_RADIUS);
     this.cueGroup.rotation.z = view.aimAngle;
-    // Pull cue stick back smoothly proportional to shot power
+    // Positive rotation.y lifts the -X cue shaft UPWARD (+Z) just enough to clear rails & balls.
+    this.cuePitchGroup.rotation.y = this.computeCueElevation(view, preview.cuePos);
+    // Pull cue stick back strictly along its own 3D axis proportional to shot power.
     const pullback = -0.02 - view.power * 0.24;
-    this.cueStick.position.x = pullback;
-    this.cueStick.rotation.y = -0.095 * this.visual3DBlend;
-    this.cueStick.position.z = 0.015 * this.visual3DBlend;
+    this.cueStick.position.set(pullback, 0, 0);
 
     this.updateLine(this.aimLine, preview.cuePos, preview.ghostBall);
     this.aimLine.visible = true;
@@ -801,6 +802,60 @@ export class PoolScene {
     }
   }
 
+  private computeCueElevation(view: PoolView, cuePos: readonly [number, number]): number {
+    const cx = cuePos[0];
+    const cy = cuePos[1];
+    // Unit vector pointing backward along the cue stick from the cue ball.
+    const bx = -Math.cos(view.aimAngle);
+    const by = -Math.sin(view.aimAngle);
+
+    // Distance along backward ray to the nearest cushion/rail boundary.
+    let dBoundary = 4.0;
+    if (bx < -1e-6) {
+      dBoundary = Math.min(dBoundary, cx / -bx);
+    } else if (bx > 1e-6) {
+      dBoundary = Math.min(dBoundary, (POOL_TABLE_WIDTH - cx) / bx);
+    }
+    if (by < -1e-6) {
+      dBoundary = Math.min(dBoundary, cy / -by);
+    } else if (by > 1e-6) {
+      dBoundary = Math.min(dBoundary, (POOL_TABLE_HEIGHT - cy) / by);
+    }
+
+    // Approximate cue stick radius at horizontal distance h behind the cue ball.
+    const stickRadiusAt = (h: number): number => 0.0062 + 0.0085 * Math.min(1, h / 1.25);
+
+    // Clear the rail/brass casting top (z = 0.041) + margin at the boundary edge.
+    const hRail = Math.max(0.06, dBoundary);
+    let maxTan = 0.018; // ~1.0 deg minimum subtle natural pitch
+    if (hRail < 1.55) {
+      const railTop = 0.0415;
+      const needed = railTop + stickRadiusAt(hRail) + 0.003 - BALL_RADIUS;
+      maxTan = Math.max(maxTan, needed / hRail);
+    }
+
+    // Also clear any object ball sitting directly behind the cue ball along the cue path.
+    for (const ball of view.state.balls) {
+      if (ball.id === 0 || ball.pocketed) {
+        continue;
+      }
+      const dx = ball.x - cx;
+      const dy = ball.y - cy;
+      const along = dx * bx + dy * by;
+      if (along <= 0.03 || along > 1.45) {
+        continue;
+      }
+      const perp = Math.abs(dx * -by + dy * bx);
+      if (perp < BALL_RADIUS + 0.016) {
+        const hBall = Math.max(0.06, along - BALL_RADIUS * 0.45);
+        const needed = BALL_RADIUS * 2 + stickRadiusAt(hBall) + 0.003 - BALL_RADIUS;
+        maxTan = Math.max(maxTan, needed / hBall);
+      }
+    }
+
+    return Math.min(0.62, Math.atan(maxTan));
+  }
+
   private makeLine(color: number, z: number): THREE.Line {
     const geo = new THREE.BufferGeometry().setFromPoints([
       new THREE.Vector3(0, 0, z),
@@ -808,6 +863,7 @@ export class PoolScene {
     ]);
     const mat = new THREE.LineBasicMaterial({ color });
     const line = new THREE.Line(geo, mat);
+    line.frustumCulled = false;
     line.visible = false;
     return line;
   }
@@ -913,8 +969,8 @@ export class PoolScene {
 
     // 3. Raised 3D mahogany rail frame (split around pocket openings so pockets are truly open!)
     const railW = POOL_RAIL_MARGIN - cushThick;
-    const railH = 0.056;
-    const railZ = 0.02; // spans z = -0.008 .. +0.048
+    const railH = 0.048;
+    const railZ = 0.016; // spans z = -0.008 .. +0.040 (4 mm proud of 36 mm cushion nose)
     const railHalfSpan = POOL_TABLE_WIDTH / 2 - 0.124;
     const railLeftX = 0.062 + railHalfSpan / 2;
     const railRightX = POOL_TABLE_WIDTH - 0.062 - railHalfSpan / 2;
@@ -938,8 +994,8 @@ export class PoolScene {
     }
 
     // Outer dark mahogany perimeter trim skirt (frames the rails cleanly in 2D & 3D)
-    const trimH = 0.066;
-    const trimZ = 0.011; // spans z = -0.022 .. +0.044
+    const trimH = 0.059;
+    const trimZ = 0.0075; // spans z = -0.022 .. +0.037
     for (const y of [
       -POOL_RAIL_MARGIN - trimPad / 2,
       POOL_TABLE_HEIGHT + POOL_RAIL_MARGIN + trimPad / 2,
@@ -960,7 +1016,7 @@ export class PoolScene {
       this.root.add(trim);
     }
 
-    // 4. Classic inlaid rail sight diamonds flush on top of mahogany rails (z = 0.049)
+    // 4. Classic inlaid rail sight diamonds flush on top of mahogany rails (z = 0.0405)
     const diamondGeo = new THREE.CircleGeometry(0.014, 4);
     const diamondMat = new THREE.MeshStandardMaterial({
       color: 0xe6b873,
@@ -972,7 +1028,7 @@ export class PoolScene {
       const x = POOL_TABLE_WIDTH * frac;
       for (const y of [-railOffset, POOL_TABLE_HEIGHT + railOffset]) {
         const d = new THREE.Mesh(diamondGeo, diamondMat);
-        d.position.set(x, y, 0.0495);
+        d.position.set(x, y, 0.0405);
         this.root.add(d);
       }
     }
@@ -980,7 +1036,7 @@ export class PoolScene {
       const y = POOL_TABLE_HEIGHT * frac;
       for (const x of [-railOffset, POOL_TABLE_WIDTH + railOffset]) {
         const d = new THREE.Mesh(diamondGeo, diamondMat);
-        d.position.set(x, y, 0.0495);
+        d.position.set(x, y, 0.0405);
         this.root.add(d);
       }
     }
@@ -1003,7 +1059,7 @@ export class PoolScene {
     cornerShape.absarc(0, 0, 0.058, Math.PI * 0.5, Math.PI * 2, false);
     cornerShape.closePath();
     const cornerCastingGeo = new THREE.ExtrudeGeometry(cornerShape, {
-      depth: 0.05,
+      depth: 0.042,
       bevelEnabled: false,
       curveSegments: 24,
     });
@@ -1021,7 +1077,7 @@ export class PoolScene {
     sideShape.absarc(0, 0, 0.058, 0, -Math.PI, true);
     sideShape.closePath();
     const sideCastingGeo = new THREE.ExtrudeGeometry(sideShape, {
-      depth: 0.05,
+      depth: 0.042,
       bevelEnabled: false,
       curveSegments: 24,
     });
