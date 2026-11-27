@@ -176,6 +176,7 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
         tables: state.tables.load(Ordering::Relaxed),
         games: state.games.load(Ordering::Relaxed),
         google_client_id: state.config.google_client_id.clone(),
+        ai_friend_available: state.ai_friend.is_configured(),
     };
 
     {

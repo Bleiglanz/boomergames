@@ -261,6 +261,14 @@ pub enum ClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<ChatScopeDto>,
     },
+    /// Toggle the optional Claude AI Friend on or off for a lounge room or table chat.
+    #[serde(rename = "chat.ai.set")]
+    ChatAiSet {
+        /// Chatroom scope (`lobby` or `table`).
+        scope: ChatScopeDto,
+        /// Desired enabled state.
+        enabled: bool,
+    },
     /// Create a new table in the active lounge and take Seat 1 as host.
     #[serde(rename = "table.create")]
     TableCreate(TableSettingsDto),
@@ -475,6 +483,14 @@ pub enum ServerMessage {
         /// Chat line payload.
         #[serde(flatten)]
         line: ChatLineDto,
+    },
+    /// Updated AI Friend toggle state for either lobby or table chat.
+    #[serde(rename = "chat.ai.state")]
+    ChatAiState {
+        /// Whether this state belongs to the lobby room or active table.
+        scope: ChatScopeDto,
+        /// Whether AI Friend is currently enabled in this chatroom.
+        enabled: bool,
     },
     /// Direct 30-second invite received from another player.
     #[serde(rename = "invite.received")]

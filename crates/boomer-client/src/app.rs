@@ -1184,6 +1184,7 @@ impl<T: GameTransport> ClientApp<T> {
                 | ServerMessage::TableUpsert(_)
                 | ServerMessage::TableRemove { .. }
                 | ServerMessage::Chat { .. }
+                | ServerMessage::ChatAiState { .. }
                 | ServerMessage::InviteReceived { .. }
                 | ServerMessage::InviteClosed { .. }
                 | ServerMessage::PlayNowQueued { .. }

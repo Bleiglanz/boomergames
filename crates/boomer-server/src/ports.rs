@@ -303,3 +303,34 @@ pub trait GoogleTokenVerifier: Send + Sync {
         id_token: &str,
     ) -> BoxFuture<'_, Result<VerifiedGoogleUser, PortError>>;
 }
+
+/// Single recent chat line supplied as lightweight context to [`AiFriend`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiChatTurn {
+    /// Speaker display name (e.g., `"Alice"` or `"Claude (AI)"`).
+    pub speaker: String,
+    /// Chat line text.
+    pub text: String,
+    /// Whether this line was spoken by the AI Friend itself.
+    pub is_ai: bool,
+}
+
+/// Compact context snapshot passed to [`AiFriend::generate_reply`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiChatContext {
+    /// One-line description of the lounge room or active game table.
+    pub setting: String,
+    /// Recent chat lines from this chatroom only (newest last, capped to keep tokens small).
+    pub recent_messages: Vec<AiChatTurn>,
+}
+
+/// Port for the optional Claude AI Friend chat companion.
+pub trait AiFriend: Send + Sync {
+    /// Returns `true` when an AI backend (e.g., Anthropic API key) is configured and enabled.
+    fn is_configured(&self) -> bool;
+
+    /// Generates a short, warm, encouraging reply given compact chatroom context.
+    ///
+    /// Returns `Err(PortError::Conflict(_))` when the server-wide safety call budget is exhausted.
+    fn generate_reply(&self, ctx: AiChatContext) -> BoxFuture<'_, Result<String, PortError>>;
+}

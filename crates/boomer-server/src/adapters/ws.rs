@@ -438,6 +438,9 @@ async fn handle_client_message(
         }
         ClientMessage::LobbyJoin { room } => handle_lobby_join(&room, session, state).await,
         ClientMessage::ChatSend { text, scope } => handle_chat_send(text, scope, session, state),
+        ClientMessage::ChatAiSet { scope, enabled } => {
+            handle_chat_ai_set(scope, enabled, session, state)
+        }
         ClientMessage::TableCreate(settings) => {
             let Some(room) = active_room_handle(session, state) else {
                 return session.send_error(ErrorCode::NotAllowed, "table.create");
@@ -886,6 +889,36 @@ fn handle_chat_send(
             room.try_send(LobbyCmd::SendChat {
                 user_id: session.user.id.clone(),
                 text,
+            });
+            true
+        }
+    }
+}
+
+fn handle_chat_ai_set(
+    scope: ChatScopeDto,
+    enabled: bool,
+    session: &ConnSession,
+    state: &AppState,
+) -> bool {
+    match scope {
+        ChatScopeDto::Table => {
+            let Some(table) = active_table_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "chat.ai.set");
+            };
+            table.try_send(TableCmd::SetAiFriend {
+                user_id: session.user.id.clone(),
+                enabled,
+            });
+            true
+        }
+        ChatScopeDto::Lobby => {
+            let Some(room) = active_room_handle(session, state) else {
+                return session.send_error(ErrorCode::NotAllowed, "chat.ai.set");
+            };
+            room.try_send(LobbyCmd::SetAiFriend {
+                user_id: session.user.id.clone(),
+                enabled,
             });
             true
         }

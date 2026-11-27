@@ -862,6 +862,18 @@ body {
   gap: 0.35rem;
 }
 
+.chat-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.chat-header-row h3 {
+  margin: 0;
+}
+
 .chat-log {
   background: var(--bg-card);
   border: 1px solid var(--border-dark);
@@ -876,6 +888,18 @@ body {
 
 .chat-line {
   word-break: break-word;
+}
+
+.chat-ai-line {
+  background: rgba(242, 184, 75, 0.14);
+  border-left: 3px solid var(--accent-gold, #c98a1c);
+  padding: 0.18rem 0.45rem;
+  border-radius: 2px;
+}
+
+[data-contrast="high"] .chat-ai-line {
+  background: transparent;
+  border-left: 4px solid var(--accent-gold, #ffdd57);
 }
 
 .chat-sys-line {

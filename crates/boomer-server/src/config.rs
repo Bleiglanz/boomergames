@@ -15,6 +15,28 @@ pub struct SmtpConfig {
     pub from: String,
 }
 
+/// Default Anthropic Claude model used for the optional chat AI Friend.
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
+
+/// Default maximum output tokens per AI Friend chat reply.
+pub const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 100;
+
+/// Default server-wide safety cap on Anthropic API calls per process run.
+pub const DEFAULT_ANTHROPIC_MAX_CALLS: u32 = 50;
+
+/// Anthropic Messages API configuration for the optional Claude AI Friend.
+#[derive(Debug, Clone)]
+pub struct AnthropicConfig {
+    /// Secret Anthropic API key (`ANTHROPIC_API_KEY`).
+    pub api_key: String,
+    /// Model ID (`ANTHROPIC_MODEL`, default `claude-haiku-4-5`).
+    pub model: String,
+    /// Max output tokens per reply (`ANTHROPIC_MAX_TOKENS`, default `100`).
+    pub max_tokens: u32,
+    /// Hard server-wide call cap (`ANTHROPIC_MAX_CALLS`, default `50`).
+    pub max_calls: u32,
+}
+
 /// Runtime configuration for `boomer-server`.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -32,6 +54,8 @@ pub struct ServerConfig {
     pub smtp: Option<SmtpConfig>,
     /// Optional Google OAuth client ID (`GOOGLE_CLIENT_ID`).
     pub google_client_id: Option<String>,
+    /// Optional Anthropic Claude API config (`ANTHROPIC_API_KEY`).
+    pub anthropic: Option<AnthropicConfig>,
 }
 
 impl Default for ServerConfig {
@@ -44,6 +68,7 @@ impl Default for ServerConfig {
             session_secret: "dev-only-insecure-secret-change-in-production".to_owned(),
             smtp: None,
             google_client_id: None,
+            anthropic: None,
         }
     }
 }
@@ -80,6 +105,30 @@ impl ServerConfig {
                     .unwrap_or_else(|_| "Boomergames <noreply@boomergames.local>".to_owned()),
             });
 
+        let anthropic = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .map(|api_key| AnthropicConfig {
+                api_key,
+                model: std::env::var("ANTHROPIC_MODEL")
+                    .ok()
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_owned()),
+                max_tokens: std::env::var("ANTHROPIC_MAX_TOKENS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
+                    .clamp(32, 256),
+                max_calls: std::env::var("ANTHROPIC_MAX_CALLS")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_CALLS),
+            });
+
         Self {
             bind_addr,
             static_dir,
@@ -88,6 +137,7 @@ impl ServerConfig {
             session_secret,
             smtp,
             google_client_id,
+            anthropic,
         }
     }
 }

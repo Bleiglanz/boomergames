@@ -157,6 +157,9 @@ export interface Strings {
   readonly loungeChatEmpty: string;
   readonly loungeChatPlaceholder: string;
   readonly loungeSendBtn: string;
+  readonly aiFriendOn: string;
+  readonly aiFriendOff: string;
+  readonly aiFriendTooltip: string;
   readonly loungeNoTables: string;
   readonly loungeOpenSeat: string;
   readonly loungeRated: string;
@@ -372,6 +375,9 @@ const EN: Strings = {
   loungeChatEmpty: "No messages yet. Say hello!",
   loungeChatPlaceholder: "Type a message (max 300 chars)…",
   loungeSendBtn: "Send",
+  aiFriendOn: "🤖 AI Friend: On",
+  aiFriendOff: "🤖 AI Friend: Off",
+  aiFriendTooltip: "Toggle Claude AI Friend in this chatroom (chimes in every 2–3 messages)",
   loungeNoTables: "No open tables yet. Click Create Table or Play Now!",
   loungeOpenSeat: "Open",
   loungeRated: "Rated",
@@ -586,6 +592,9 @@ const DE: Strings = {
   loungeChatEmpty: "Noch keine Nachrichten. Sag Hallo!",
   loungeChatPlaceholder: "Nachricht schreiben (max. 300 Zeichen)…",
   loungeSendBtn: "Senden",
+  aiFriendOn: "🤖 KI-Freund: An",
+  aiFriendOff: "🤖 KI-Freund: Aus",
+  aiFriendTooltip: "Claude KI-Freund in diesem Chat ein-/ausschalten (meldet sich alle 2–3 Nachrichten)",
   loungeNoTables: "Noch keine offenen Tische. Erstelle einen Tisch oder nutze Jetzt spielen!",
   loungeOpenSeat: "Frei",
   loungeRated: "Gewertet",

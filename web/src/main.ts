@@ -330,6 +330,7 @@ interface PoolWidgets {
 
 interface InlineTableChat {
   readonly log: HTMLElement;
+  readonly aiBtn: HTMLButtonElement;
   lastKey: string;
 }
 
@@ -1330,8 +1331,21 @@ function buildInlineTableChat(
   const wrap = document.createElement("div");
   wrap.className = "inline-chat-panel";
 
+  const headerRow = document.createElement("div");
+  headerRow.className = "chat-header-row";
   const heading = document.createElement("h3");
   heading.textContent = s.loungeTableChatTitle;
+
+  const aiBtn = document.createElement("button");
+  aiBtn.type = "button";
+  aiBtn.className = "classic-btn btn-sm";
+  aiBtn.style.display = "none";
+  aiBtn.title = s.aiFriendTooltip;
+  aiBtn.addEventListener("click", () => {
+    const currentlyOn = Boolean(session.state.activeTable?.aiFriend);
+    session.setAiFriend("table", !currentlyOn);
+  });
+  headerRow.append(heading, aiBtn);
 
   const log = document.createElement("div");
   log.className = "chat-log inline-chat-log";
@@ -1361,9 +1375,9 @@ function buildInlineTableChat(
   });
 
   form.append(input, sendBtn);
-  wrap.append(heading, log, form);
+  wrap.append(headerRow, log, form);
   parent.append(wrap);
-  return { log, lastKey: "" };
+  return { log, aiBtn, lastKey: "" };
 }
 
 function updateInlineTableChat(
@@ -1371,7 +1385,19 @@ function updateInlineTableChat(
   lines: readonly ChatLineDto[],
   ignored: ReadonlySet<string>,
   s: Strings,
+  aiAvailable: boolean,
+  aiEnabled: boolean,
 ): void {
+  chat.aiBtn.style.display = aiAvailable ? "" : "none";
+  if (aiAvailable) {
+    chat.aiBtn.textContent = aiEnabled ? s.aiFriendOn : s.aiFriendOff;
+    chat.aiBtn.className = aiEnabled
+      ? "classic-btn btn-sm active-toggle"
+      : "classic-btn btn-sm";
+    chat.aiBtn.setAttribute("aria-pressed", String(aiEnabled));
+    chat.aiBtn.title = s.aiFriendTooltip;
+  }
+
   const visible = lines.filter((line) => line.from === undefined || !ignored.has(line.from));
   const last = visible[visible.length - 1];
   const key = `${visible.length}:${last?.ts ?? 0}:${last?.text ?? ""}`;
@@ -1389,7 +1415,11 @@ function updateInlineTableChat(
   }
   for (const line of visible) {
     const item = document.createElement("div");
-    item.className = line.sys ? "chat-sys-line" : "chat-line";
+    item.className = line.sys
+      ? "chat-sys-line"
+      : line.ai
+        ? "chat-line chat-ai-line"
+        : "chat-line";
     if (!line.sys && line.name !== undefined) {
       const author = document.createElement("strong");
       author.textContent = `${line.name}: `;
@@ -1697,7 +1727,14 @@ function updateGameShellInPlace(
   }
 
   if (shell.inlineChat !== null && onlineTable !== null) {
-    updateInlineTableChat(shell.inlineChat, onlineTable.chat, onlineSession.state.ignored, s);
+    updateInlineTableChat(
+      shell.inlineChat,
+      onlineTable.chat,
+      onlineSession.state.ignored,
+      s,
+      onlineTable.aiFriendAvailable ?? onlineSession.state.aiFriendAvailable,
+      Boolean(onlineTable.aiFriend),
+    );
   }
 
   shell.bannerHost.innerHTML = "";

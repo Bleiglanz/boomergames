@@ -558,14 +558,35 @@ export class LobbyController {
     title: string,
   ): HTMLElement {
     const s = this.strings;
-    const ignored = this.session.state.ignored;
+    const st = this.session.state;
+    const ignored = st.ignored;
 
     const panel = document.createElement("section");
     panel.className = "lounge-panel lounge-chat-panel";
 
+    const headerRow = document.createElement("div");
+    headerRow.className = "panel-heading-row chat-header-row";
     const h3 = document.createElement("h3");
     h3.textContent = title;
-    panel.append(h3);
+    headerRow.append(h3);
+
+    const aiAvailable =
+      scope === "table"
+        ? (st.activeTable?.aiFriendAvailable ?? st.aiFriendAvailable)
+        : st.aiFriendAvailable;
+    if (aiAvailable) {
+      const aiEnabled =
+        scope === "table" ? Boolean(st.activeTable?.aiFriend) : st.lobbyAiFriend;
+      const aiBtn = makeBtn(
+        aiEnabled ? s.aiFriendOn : s.aiFriendOff,
+        () => this.session.setAiFriend(scope, !aiEnabled),
+        { active: aiEnabled, small: true },
+      );
+      aiBtn.title = s.aiFriendTooltip;
+      aiBtn.setAttribute("aria-pressed", String(aiEnabled));
+      headerRow.append(aiBtn);
+    }
+    panel.append(headerRow);
 
     const log = document.createElement("div");
     log.className = "chat-log";
@@ -581,7 +602,11 @@ export class LobbyController {
     } else {
       for (const line of visible) {
         const item = document.createElement("div");
-        item.className = line.sys ? "chat-sys-line" : "chat-line";
+        item.className = line.sys
+          ? "chat-sys-line"
+          : line.ai
+            ? "chat-line chat-ai-line"
+            : "chat-line";
         const ts = document.createElement("span");
         ts.className = "chat-ts";
         ts.textContent = `[${formatTime(line.ts)}] `;

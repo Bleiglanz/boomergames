@@ -12,9 +12,13 @@ use boomer_protocol::{
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::actors::ai_chat::{
+    AiChatState, game_context_name, make_ai_chat_line, recent_chat_turns, sanitize_ai_reply,
+};
 use crate::actors::hub::LobbyHub;
 use crate::actors::table_actor::{TableActor, TableClient, TableCmd, TableInit};
 use crate::actors::{ClientSink, MAX_CHAT_HISTORY, broadcast_msg, sanitize_chat_text};
+use crate::ports::{AiChatContext, PortError};
 
 /// Room chat rate limit (1 msg/s per `incubation/plan.md` §9.6).
 const CHAT_MIN_INTERVAL: Duration = Duration::from_secs(1);
@@ -124,6 +128,20 @@ pub enum LobbyCmd {
         /// Raw message text.
         text: String,
     },
+    /// Toggle the optional Claude AI Friend on or off for this lounge room.
+    SetAiFriend {
+        /// Requesting member wire ID.
+        user_id: String,
+        /// Desired enabled state.
+        enabled: bool,
+    },
+    /// Internal callback delivering an asynchronously generated AI Friend chat reply.
+    AiReply {
+        /// Request generation counter used to discard stale replies after toggle/reset.
+        generation: u64,
+        /// Generated reply text or error from [`crate::ports::AiFriend`].
+        result: Result<String, PortError>,
+    },
     /// Create a new table in this room and seat the caller as host.
     CreateTable {
         /// Creator wire ID.
@@ -198,8 +216,10 @@ pub struct LobbyActor {
     members: HashMap<String, LobbyMember>,
     tables: HashMap<String, TableSummaryDto>,
     chat: VecDeque<ChatLineDto>,
+    ai_chat: AiChatState,
     invites: HashMap<String, PendingInvite>,
     play_now_queue: Vec<PlayNowTicket>,
+    self_tx: mpsc::Sender<LobbyCmd>,
     cmd_rx: mpsc::Receiver<LobbyCmd>,
     event_tx: mpsc::Sender<LobbyEvent>,
     event_rx: mpsc::Receiver<LobbyEvent>,
@@ -217,11 +237,14 @@ impl LobbyActor {
     ) -> LobbyHandle {
         let (cmd_tx, cmd_rx) = mpsc::channel(LOBBY_CMD_CAPACITY);
         let (event_tx, event_rx) = mpsc::channel(LOBBY_EVENT_CAPACITY);
+        let self_tx = cmd_tx.clone();
         let handle = LobbyHandle {
             room_id: room_id.clone(),
             game,
             cmd_tx,
         };
+        // Social Lounges default to AI Friend ON whenever an Anthropic key is configured.
+        let ai_default_on = hub.ai_friend().is_configured();
         let mut actor = Self {
             room_id,
             game,
@@ -229,8 +252,10 @@ impl LobbyActor {
             members: HashMap::new(),
             tables: HashMap::new(),
             chat: VecDeque::with_capacity(MAX_CHAT_HISTORY),
+            ai_chat: AiChatState::new(ai_default_on),
             invites: HashMap::new(),
             play_now_queue: Vec::new(),
+            self_tx,
             cmd_rx,
             event_tx,
             event_rx,
@@ -310,6 +335,12 @@ impl LobbyActor {
                 muted,
             } => self.handle_update_user(user, ignored, muted),
             LobbyCmd::SendChat { user_id, text } => self.handle_chat(&user_id, &text),
+            LobbyCmd::SetAiFriend { user_id, enabled } => {
+                self.handle_set_ai_friend(&user_id, enabled);
+            }
+            LobbyCmd::AiReply { generation, result } => {
+                self.handle_ai_reply(generation, result);
+            }
             LobbyCmd::CreateTable { user_id, settings } => {
                 self.handle_create_table(&user_id, settings);
             }
@@ -421,6 +452,8 @@ impl LobbyActor {
             chat: self.chat.iter().cloned().collect(),
             online: self.hub.online_count(),
             ignored: ignored_vec,
+            ai_friend_available: self.hub.ai_friend().is_configured(),
+            ai_friend: self.ai_chat.is_enabled(),
         })
     }
 
@@ -484,7 +517,114 @@ impl LobbyActor {
             text: clean,
             ts: Utc::now().timestamp_millis(),
             sys: false,
+            ai: false,
         };
+        self.push_chat_and_broadcast(line);
+        self.maybe_trigger_ai_reply();
+    }
+
+    fn handle_set_ai_friend(&mut self, user_id: &str, enabled: bool) {
+        let Some(member) = self.members.get(user_id) else {
+            return;
+        };
+        let sink = member.sink.clone();
+        let actor_name = member.user.name.clone();
+        if member.muted {
+            let _ = sink.send_msg(&ServerMessage::Error {
+                code: ErrorCode::Muted,
+                re: "chat.ai.set".to_owned(),
+            });
+            return;
+        }
+        if !self.hub.ai_friend().is_configured() {
+            let _ = sink.send_msg(&ServerMessage::Error {
+                code: ErrorCode::NotAllowed,
+                re: "chat.ai.set".to_owned(),
+            });
+            return;
+        }
+        if self.ai_chat.set_enabled(enabled) {
+            self.broadcast_all(&ServerMessage::ChatAiState {
+                scope: ChatScopeDto::Lobby,
+                enabled,
+            });
+            let state_word = if enabled { "on" } else { "off" };
+            self.push_system_chat(&format!("{actor_name} turned AI Friend {state_word}."));
+        } else {
+            let _ = sink.send_msg(&ServerMessage::ChatAiState {
+                scope: ChatScopeDto::Lobby,
+                enabled,
+            });
+        }
+    }
+
+    fn maybe_trigger_ai_reply(&mut self) {
+        let ai_friend = self.hub.ai_friend();
+        if !ai_friend.is_configured() {
+            return;
+        }
+        let cooldown = self.hub.ai_reply_cooldown();
+        let solo_human = self.members.len() <= 1;
+        let Some(generation) = self
+            .ai_chat
+            .on_human_message(Instant::now(), cooldown, solo_human)
+        else {
+            return;
+        };
+        let ctx = AiChatContext {
+            setting: format!(
+                "{} Social Lounge ({}, {} players in room)",
+                game_context_name(self.game),
+                self.room_id,
+                self.members.len()
+            ),
+            recent_messages: recent_chat_turns(&self.chat),
+        };
+        let tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let result = ai_friend.generate_reply(ctx).await;
+            let _ = tx.send(LobbyCmd::AiReply { generation, result }).await;
+        });
+    }
+
+    fn handle_ai_reply(&mut self, generation: u64, result: Result<String, PortError>) {
+        let succeeded = result.is_ok();
+        if !self
+            .ai_chat
+            .finish_request(generation, succeeded, Instant::now())
+        {
+            return;
+        }
+        match result {
+            Ok(reply) => {
+                if let Some(clean) = sanitize_ai_reply(&reply) {
+                    self.push_chat_and_broadcast(make_ai_chat_line(clean));
+                }
+            }
+            Err(PortError::Conflict(_)) => {
+                self.ai_chat.set_enabled(false);
+                self.broadcast_all(&ServerMessage::ChatAiState {
+                    scope: ChatScopeDto::Lobby,
+                    enabled: false,
+                });
+                self.push_system_chat("🤖 AI Friend is taking a break (API call limit reached).");
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn push_system_chat(&mut self, text: &str) {
+        self.push_chat_and_broadcast(ChatLineDto {
+            from: None,
+            name: None,
+            text: text.to_owned(),
+            ts: Utc::now().timestamp_millis(),
+            sys: true,
+            ai: false,
+        });
+    }
+
+    fn push_chat_and_broadcast(&mut self, line: ChatLineDto) {
         if self.chat.len() >= MAX_CHAT_HISTORY {
             let _ = self.chat.pop_front();
         }

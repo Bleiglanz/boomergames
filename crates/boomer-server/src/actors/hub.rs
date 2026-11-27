@@ -10,10 +10,11 @@ use boomer_protocol::{ChatLineDto, ChatScopeDto, GameKindDto, RoomSummaryDto, Se
 use chrono::Utc;
 use tokio::sync::{Notify, Semaphore};
 
+use crate::actors::ai_chat::DEFAULT_AI_REPLY_COOLDOWN;
 use crate::actors::lobby_actor::{LobbyActor, LobbyHandle};
 use crate::actors::table_actor::TableHandle;
 use crate::actors::{ClientSink, broadcast_msg};
-use crate::ports::MatchRepo;
+use crate::ports::{AiFriend, MatchRepo};
 
 /// Default soft capacity per lounge room (`incubation/plan.md` §5.3).
 pub const DEFAULT_ROOM_CAPACITY: usize = 100;
@@ -59,6 +60,8 @@ pub struct LobbyHub {
     tables_count: Arc<AtomicU32>,
     games_count: Arc<AtomicU32>,
     matches: Arc<dyn MatchRepo>,
+    ai_friend: Arc<dyn AiFriend>,
+    ai_reply_cooldown: RwLock<Duration>,
     bot_semaphore: Arc<Semaphore>,
     draining: AtomicBool,
     shutting_down: AtomicBool,
@@ -69,19 +72,21 @@ pub struct LobbyHub {
 }
 
 impl LobbyHub {
-    /// Creates a new [`LobbyHub`] with initial Social Lounge rooms for 8-Ball Pool and Checkers.
+    /// Creates a new [`LobbyHub`] with initial Social Lounge rooms for 8-Ball Pool, Checkers, and Chess.
     #[must_use]
     pub fn new(
         online: Arc<AtomicU32>,
         tables_count: Arc<AtomicU32>,
         games_count: Arc<AtomicU32>,
         matches: Arc<dyn MatchRepo>,
+        ai_friend: Arc<dyn AiFriend>,
     ) -> Arc<Self> {
         Self::with_limits(
             online,
             tables_count,
             games_count,
             matches,
+            ai_friend,
             DEFAULT_ROOM_CAPACITY,
             DEFAULT_AUTO_OPEN_THRESHOLD,
         )
@@ -94,6 +99,7 @@ impl LobbyHub {
         tables_count: Arc<AtomicU32>,
         games_count: Arc<AtomicU32>,
         matches: Arc<dyn MatchRepo>,
+        ai_friend: Arc<dyn AiFriend>,
         room_capacity: usize,
         auto_open_threshold: u32,
     ) -> Arc<Self> {
@@ -111,6 +117,8 @@ impl LobbyHub {
             tables_count,
             games_count,
             matches,
+            ai_friend,
+            ai_reply_cooldown: RwLock::new(DEFAULT_AI_REPLY_COOLDOWN),
             bot_semaphore: Arc::new(Semaphore::new(BOT_WORKER_PERMITS)),
             draining: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
@@ -130,6 +138,27 @@ impl LobbyHub {
     #[must_use]
     pub fn matches_repo(&self) -> Arc<dyn MatchRepo> {
         Arc::clone(&self.matches)
+    }
+
+    /// Returns the shared optional [`AiFriend`] companion port.
+    #[must_use]
+    pub fn ai_friend(&self) -> Arc<dyn AiFriend> {
+        Arc::clone(&self.ai_friend)
+    }
+
+    /// Returns the minimum per-chatroom cooldown between consecutive AI Friend replies.
+    #[must_use]
+    pub fn ai_reply_cooldown(&self) -> Duration {
+        self.ai_reply_cooldown
+            .read()
+            .map_or(DEFAULT_AI_REPLY_COOLDOWN, |d| *d)
+    }
+
+    /// Overrides the per-chatroom AI Friend cooldown (used by integration tests).
+    pub fn set_ai_reply_cooldown(&self, cooldown: Duration) {
+        if let Ok(mut guard) = self.ai_reply_cooldown.write() {
+            *guard = cooldown;
+        }
     }
 
     /// Returns the bounded semaphore limiting concurrent blocking bot AI jobs.
@@ -367,6 +396,7 @@ impl LobbyHub {
                 text: "Server update in a few minutes — running games will finish".to_owned(),
                 ts: Utc::now().timestamp_millis(),
                 sys: true,
+                ai: false,
             },
         };
         if let Ok(guard) = self.connected_sinks.read() {

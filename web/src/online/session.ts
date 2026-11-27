@@ -66,6 +66,7 @@ export interface ChatLineDto {
   readonly text: string;
   readonly ts: number;
   readonly sys?: boolean;
+  readonly ai?: boolean;
 }
 
 export interface LobbySnapshotDto {
@@ -77,6 +78,8 @@ export interface LobbySnapshotDto {
   readonly chat: readonly ChatLineDto[];
   readonly online: number;
   readonly ignored?: readonly string[];
+  readonly aiFriendAvailable?: boolean;
+  readonly aiFriend?: boolean;
 }
 
 export interface TableSnapshotDto {
@@ -94,6 +97,8 @@ export interface TableSnapshotDto {
   readonly turn: number;
   readonly activeSeat?: "1" | "2" | null;
   readonly msLeft: number;
+  readonly aiFriendAvailable?: boolean;
+  readonly aiFriend?: boolean;
 }
 
 export interface TableUpdateDto {
@@ -159,6 +164,8 @@ export interface OnlineState {
   users: UserDto[];
   tables: TableSummaryDto[];
   lobbyChat: ChatLineDto[];
+  aiFriendAvailable: boolean;
+  lobbyAiFriend: boolean;
   activeTable: TableSnapshotDto | null;
   ignored: Set<string>;
   pendingInvites: PendingInviteView[];
@@ -224,6 +231,8 @@ export class OnlineSession {
     users: [],
     tables: [],
     lobbyChat: [],
+    aiFriendAvailable: false,
+    lobbyAiFriend: false,
     activeTable: null,
     ignored: new Set<string>(),
     pendingInvites: [],
@@ -291,12 +300,17 @@ export class OnlineSession {
         this.notify();
         return false;
       }
-      const data = (await resp.json()) as { status?: unknown; googleClientId?: unknown };
+      const data = (await resp.json()) as {
+        status?: unknown;
+        googleClientId?: unknown;
+        aiFriendAvailable?: unknown;
+      };
       if (typeof data.status === "string") {
         this.state.googleClientId =
           typeof data.googleClientId === "string" && data.googleClientId.trim() !== ""
             ? data.googleClientId.trim()
             : null;
+        this.state.aiFriendAvailable = Boolean(data.aiFriendAvailable);
         this.state.status = "idle";
         this.notify();
         return true;
@@ -368,6 +382,10 @@ export class OnlineSession {
       return;
     }
     this.send("chat.send", { text: trimmed, scope });
+  }
+
+  setAiFriend(scope: ChatScopeDto, enabled: boolean): void {
+    this.send("chat.ai.set", { scope, enabled });
   }
 
   createTable(settings: TableSettingsDto): void {
@@ -605,6 +623,8 @@ export class OnlineSession {
         this.state.users = [...snap.users];
         this.state.tables = [...snap.tables];
         this.state.lobbyChat = [...snap.chat];
+        this.state.aiFriendAvailable = Boolean(snap.aiFriendAvailable);
+        this.state.lobbyAiFriend = Boolean(snap.aiFriend);
         this.state.onlineCount = snap.online;
         this.state.ignored = new Set(snap.ignored ?? []);
         if (
@@ -665,6 +685,7 @@ export class OnlineSession {
           text: String(d.text ?? ""),
           ts: Number(d.ts ?? Date.now()),
           sys: Boolean(d.sys),
+          ai: Boolean(d.ai),
         };
         if (scope === "table" && this.state.activeTable !== null) {
           const nextChat = [...this.state.activeTable.chat, line].slice(-50);
@@ -674,10 +695,23 @@ export class OnlineSession {
         }
         break;
       }
+      case "chat.ai.state": {
+        const scope = d.scope as ChatScopeDto;
+        const enabled = Boolean(d.enabled);
+        if (scope === "table" && this.state.activeTable !== null) {
+          this.state.activeTable = { ...this.state.activeTable, aiFriend: enabled };
+        } else if (scope === "lobby") {
+          this.state.lobbyAiFriend = enabled;
+        }
+        break;
+      }
       case "table.snapshot": {
         const nextTable = d as unknown as TableSnapshotDto;
         if (this.state.activeTable?.id !== nextTable.id) {
           this.latestGameFrameJson = null;
+        }
+        if (nextTable.aiFriendAvailable !== undefined) {
+          this.state.aiFriendAvailable = Boolean(nextTable.aiFriendAvailable);
         }
         this.state.activeTable = nextTable;
         this.state.playNowState = "idle";

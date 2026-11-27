@@ -19,6 +19,9 @@ use boomer_protocol::{
 use chrono::Utc;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::actors::ai_chat::{
+    AiChatState, game_context_name, make_ai_chat_line, recent_chat_turns, sanitize_ai_reply,
+};
 use crate::actors::game_session::{
     ActiveGame, BotDecision, BotWorkRequest, MatchFinishInfo, ServerCheckersMatch,
     ServerChessMatch, ServerPoolMatch, spawn_bot_turn,
@@ -31,7 +34,7 @@ use crate::actors::{
 use crate::mapping::{
     bot_level_to_db, format_user_id, game_kind_from_dto, parse_user_id, seat_to_dto,
 };
-use crate::ports::{RecordMatchInput, RecordMatchOutcome};
+use crate::ports::{AiChatContext, PortError, RecordMatchInput, RecordMatchOutcome};
 
 /// Rejoin cooldown after being booted by the table host (5 minutes per Milestone 5.3).
 const BOOT_BLOCK_DURATION: Duration = Duration::from_secs(5 * 60);
@@ -169,6 +172,20 @@ pub enum TableCmd {
         user_id: String,
         /// Raw message text.
         text: String,
+    },
+    /// Toggle the optional Claude AI Friend on or off for this table's chat.
+    SetAiFriend {
+        /// Requesting participant wire ID.
+        user_id: String,
+        /// Desired enabled state.
+        enabled: bool,
+    },
+    /// Internal callback delivering an asynchronously generated AI Friend chat reply.
+    AiReply {
+        /// Request generation counter used to discard stale replies after toggle/reset.
+        generation: u64,
+        /// Generated reply text or error from [`crate::ports::AiFriend`].
+        result: Result<String, PortError>,
     },
     /// Toggle Ready for a seated player.
     ToggleReady {
@@ -332,6 +349,7 @@ pub struct TableActor {
     watchers: HashMap<String, TableClient>,
     phase: TablePhaseDto,
     chat: VecDeque<ChatLineDto>,
+    ai_chat: AiChatState,
     active_game: Option<ActiveGame>,
     bot_thinking: bool,
     match_index: u32,
@@ -400,6 +418,8 @@ impl TableActor {
             watchers: HashMap::new(),
             phase: TablePhaseDto::Waiting,
             chat: VecDeque::with_capacity(MAX_CHAT_HISTORY),
+            // Individual tables start with AI Friend OFF until toggled on.
+            ai_chat: AiChatState::new(false),
             active_game: None,
             bot_thinking: false,
             match_index: 0,
@@ -471,6 +491,12 @@ impl TableActor {
             }
             TableCmd::Leave { user_id } => self.handle_leave(&user_id),
             TableCmd::SendChat { user_id, text } => self.handle_chat(&user_id, &text),
+            TableCmd::SetAiFriend { user_id, enabled } => {
+                self.handle_set_ai_friend(&user_id, enabled);
+            }
+            TableCmd::AiReply { generation, result } => {
+                self.handle_ai_reply(generation, result);
+            }
             TableCmd::ToggleReady { user_id } => self.handle_ready(&user_id),
             TableCmd::UpdateSettings { user_id, settings } => {
                 self.handle_update_settings(&user_id, settings);
@@ -785,6 +811,7 @@ impl TableActor {
         self.ready = [false, self.house_bot_level.is_some()];
         self.rematch_ready = [false, false];
         self.chat.clear();
+        self.ai_chat.reset(false);
         self.emit_summary();
     }
 
@@ -829,8 +856,121 @@ impl TableActor {
             text: clean,
             ts: Utc::now().timestamp_millis(),
             sys: false,
+            ai: false,
         };
         self.push_chat_and_broadcast(line);
+        self.maybe_trigger_ai_reply();
+    }
+
+    fn handle_set_ai_friend(&mut self, user_id: &str, enabled: bool) {
+        let is_watcher = self.watchers.contains_key(user_id);
+        let mute_spectators = self.settings.mute_spectators;
+        let Some(client) = self.find_client_mut(user_id) else {
+            return;
+        };
+        let sink = client.sink.clone();
+        let actor_name = client.user.name.clone();
+        if client.muted || (is_watcher && mute_spectators) {
+            let _ = sink.send_msg(&ServerMessage::Error {
+                code: ErrorCode::Muted,
+                re: "chat.ai.set".to_owned(),
+            });
+            return;
+        }
+        if !self.hub.ai_friend().is_configured() {
+            let _ = sink.send_msg(&ServerMessage::Error {
+                code: ErrorCode::NotAllowed,
+                re: "chat.ai.set".to_owned(),
+            });
+            return;
+        }
+        if self.ai_chat.set_enabled(enabled) {
+            self.broadcast_table_msg(&ServerMessage::ChatAiState {
+                scope: ChatScopeDto::Table,
+                enabled,
+            });
+            let state_word = if enabled { "on" } else { "off" };
+            self.push_system_chat(&format!("{actor_name} turned AI Friend {state_word}."));
+        } else {
+            let _ = sink.send_msg(&ServerMessage::ChatAiState {
+                scope: ChatScopeDto::Table,
+                enabled,
+            });
+        }
+    }
+
+    fn maybe_trigger_ai_reply(&mut self) {
+        let ai_friend = self.hub.ai_friend();
+        if !ai_friend.is_configured() {
+            return;
+        }
+        let cooldown = self.hub.ai_reply_cooldown();
+        let solo_human = self.human_count() <= 1;
+        let Some(generation) = self
+            .ai_chat
+            .on_human_message(Instant::now(), cooldown, solo_human)
+        else {
+            return;
+        };
+        let s1 = self.seats[0]
+            .as_ref()
+            .map_or_else(|| "open seat".to_owned(), SeatOccupant::label);
+        let s2 = self.seats[1]
+            .as_ref()
+            .map_or_else(|| "open seat".to_owned(), SeatOccupant::label);
+        let phase_str = match self.phase {
+            TablePhaseDto::Waiting => "waiting to start",
+            TablePhaseDto::Playing => "match in progress",
+            TablePhaseDto::Over => "match finished",
+        };
+        let turn_info = self
+            .active_game
+            .as_ref()
+            .map_or_else(String::new, |g| format!(", turn {}", g.turn_number()));
+        let ctx = AiChatContext {
+            setting: format!(
+                "Table #{} ({}, {}: {} vs {}{}, {} spectators)",
+                self.no,
+                game_context_name(self.game),
+                phase_str,
+                s1,
+                s2,
+                turn_info,
+                self.watchers.len()
+            ),
+            recent_messages: recent_chat_turns(&self.chat),
+        };
+        let tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let result = ai_friend.generate_reply(ctx).await;
+            let _ = tx.send(TableCmd::AiReply { generation, result }).await;
+        });
+    }
+
+    fn handle_ai_reply(&mut self, generation: u64, result: Result<String, PortError>) {
+        let succeeded = result.is_ok();
+        if !self
+            .ai_chat
+            .finish_request(generation, succeeded, Instant::now())
+        {
+            return;
+        }
+        match result {
+            Ok(reply) => {
+                if let Some(clean) = sanitize_ai_reply(&reply) {
+                    self.push_chat_and_broadcast(make_ai_chat_line(clean));
+                }
+            }
+            Err(PortError::Conflict(_)) => {
+                self.ai_chat.set_enabled(false);
+                self.broadcast_table_msg(&ServerMessage::ChatAiState {
+                    scope: ChatScopeDto::Table,
+                    enabled: false,
+                });
+                self.push_system_chat("🤖 AI Friend is taking a break (API call limit reached).");
+            }
+            Err(_) => {}
+        }
     }
 
     fn handle_ready(&mut self, user_id: &str) {
@@ -1664,6 +1804,8 @@ impl TableActor {
             turn,
             active_seat,
             ms_left,
+            ai_friend_available: self.hub.ai_friend().is_configured(),
+            ai_friend: self.ai_chat.is_enabled(),
         }
     }
 
@@ -1709,6 +1851,7 @@ impl TableActor {
             text: text.to_owned(),
             ts: Utc::now().timestamp_millis(),
             sys: true,
+            ai: false,
         });
     }
 

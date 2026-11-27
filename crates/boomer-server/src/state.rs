@@ -9,10 +9,12 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::actors::hub::LobbyHub;
+use crate::adapters::anthropic::DisabledAiFriend;
 use crate::auth::TokenSigner;
 use crate::config::ServerConfig;
 use crate::ports::{
-    GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo, StatsRepo, UserRepo,
+    AiFriend, GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo, StatsRepo,
+    UserRepo,
 };
 
 /// JSON payload returned by public `GET /status`.
@@ -36,6 +38,8 @@ pub struct StatusPayload {
     /// Public Google Identity Services OAuth Client ID, when configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub google_client_id: Option<String>,
+    /// Whether the optional Claude AI Friend chat companion is configured.
+    pub ai_friend_available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +70,8 @@ pub struct AppState {
     pub mailer: Arc<dyn MailSender>,
     /// Google Identity Services token verifier port.
     pub google: Arc<dyn GoogleTokenVerifier>,
+    /// Optional Claude AI Friend chat companion port.
+    pub ai_friend: Arc<dyn AiFriend>,
     /// Startup instant for `uptimeS`.
     pub started_at: Instant,
     /// Live connected client count.
@@ -101,11 +107,13 @@ impl AppState {
         let online = Arc::new(AtomicU32::new(0));
         let tables = Arc::new(AtomicU32::new(0));
         let games = Arc::new(AtomicU32::new(0));
+        let ai_friend: Arc<dyn AiFriend> = Arc::new(DisabledAiFriend);
         let hub = LobbyHub::new(
             Arc::clone(&online),
             Arc::clone(&tables),
             Arc::clone(&games),
             Arc::clone(&matches),
+            Arc::clone(&ai_friend),
         );
         Self {
             config: Arc::new(config),
@@ -117,6 +125,7 @@ impl AppState {
             health,
             mailer,
             google,
+            ai_friend,
             started_at: Instant::now(),
             online,
             tables,
@@ -125,6 +134,22 @@ impl AppState {
             next_guest_num: Arc::new(AtomicU32::new(1000)),
             status_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Replaces the [`AiFriend`] port and rebuilds [`LobbyHub`] so lounges reflect availability.
+    #[must_use]
+    pub fn with_ai_friend(mut self, ai_friend: Arc<dyn AiFriend>) -> Self {
+        self.tables.store(0, Ordering::Relaxed);
+        self.games.store(0, Ordering::Relaxed);
+        self.ai_friend = ai_friend;
+        self.hub = LobbyHub::new(
+            Arc::clone(&self.online),
+            Arc::clone(&self.tables),
+            Arc::clone(&self.games),
+            Arc::clone(&self.matches),
+            Arc::clone(&self.ai_friend),
+        );
+        self
     }
 
     /// Replaces the [`LobbyHub`] with custom capacity/auto-open thresholds (for integration tests).
@@ -137,6 +162,7 @@ impl AppState {
             Arc::clone(&self.tables),
             Arc::clone(&self.games),
             Arc::clone(&self.matches),
+            Arc::clone(&self.ai_friend),
             room_capacity,
             auto_open_threshold,
         );

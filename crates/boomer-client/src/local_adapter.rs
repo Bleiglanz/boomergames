@@ -1157,6 +1157,7 @@ impl GameTransport for LocalSessionAdapter {
             | ClientMessage::HighscoresGet { .. }
             | ClientMessage::LobbyJoin { .. }
             | ClientMessage::ChatSend { .. }
+            | ClientMessage::ChatAiSet { .. }
             | ClientMessage::TableCreate(_)
             | ClientMessage::TableJoin { .. }
             | ClientMessage::TableLeave {}

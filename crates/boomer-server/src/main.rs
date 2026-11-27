@@ -4,13 +4,15 @@
 
 use std::sync::Arc;
 
+use boomer_server::adapters::anthropic::{AnthropicAiFriend, DisabledAiFriend};
 use boomer_server::adapters::db::PgRepos;
 use boomer_server::adapters::google::{GoogleIdTokenVerifier, UnconfiguredGoogleVerifier};
 use boomer_server::adapters::mail::{LettreMailSender, LogMailSender};
 use boomer_server::adapters::memory::MemoryRepos;
 use boomer_server::auth::TokenSigner;
 use boomer_server::ports::{
-    GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo, StatsRepo, UserRepo,
+    AiFriend, GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo, StatsRepo,
+    UserRepo,
 };
 use boomer_server::{AppState, ServerConfig, build_router};
 use tokio::net::TcpListener;
@@ -84,6 +86,22 @@ async fn main() {
         |client_id| Arc::new(GoogleIdTokenVerifier::new(client_id.clone())),
     );
 
+    let ai_friend: Arc<dyn AiFriend> = config.anthropic.as_ref().map_or_else(
+        || {
+            info!("ANTHROPIC_API_KEY not set; AI Friend chat companion disabled");
+            Arc::new(DisabledAiFriend) as Arc<dyn AiFriend>
+        },
+        |anthropic| {
+            info!(
+                model = %anthropic.model,
+                max_tokens = anthropic.max_tokens,
+                max_calls = anthropic.max_calls,
+                "configured Anthropic AI Friend chat companion"
+            );
+            Arc::new(AnthropicAiFriend::new(anthropic))
+        },
+    );
+
     let signer = Arc::new(TokenSigner::new(config.session_secret.as_bytes()));
     let state = AppState::new(
         config.clone(),
@@ -95,7 +113,8 @@ async fn main() {
         repos.health,
         mailer,
         google,
-    );
+    )
+    .with_ai_friend(ai_friend);
 
     let drain_hub = Arc::clone(&state.hub);
     let router = build_router(state);
