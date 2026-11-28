@@ -13,6 +13,7 @@ import {
 import { loadPrefs, savePrefs, THEME_IDS, type ThemeId, type UserPrefs } from "./prefs.js";
 import { StageRenderer } from "./render/renderer.js";
 import { mountAdminPage } from "./ui/admin.js";
+import { appendChatTextWithKatex } from "./ui/chat_math.js";
 import { LobbyController } from "./ui/lobby.js";
 import {
   RemoteWasmBridge,
@@ -1231,6 +1232,10 @@ async function bootstrap(): Promise<void> {
       makeExternalLink("https://github.com/nmrugg/stockfish.js", "nmrugg/stockfish.js"),
       document.createTextNode(", "),
       makeExternalLink("https://www.gnu.org/licenses/gpl-3.0.html", "GPL-3.0"),
+      document.createTextNode(`) · ${s.mathCreditsPrefix} `),
+      makeExternalLink("https://katex.org/", "KaTeX"),
+      document.createTextNode(" ("),
+      makeExternalLink("https://github.com/KaTeX/KaTeX/blob/main/LICENSE", "MIT"),
       document.createTextNode(")"),
     );
 
@@ -1504,7 +1509,7 @@ function updateInlineTableChat(
       author.textContent = `${line.name}: `;
       item.append(author);
     }
-    item.append(document.createTextNode(line.text));
+    appendChatTextWithKatex(item, line.text);
     chat.log.append(item);
   }
   chat.log.scrollTop = chat.log.scrollHeight;

@@ -52,6 +52,7 @@ export interface Strings {
   readonly chessDrawInsufficient: string;
   readonly chessStockfishThinking: string;
   readonly chessEngineCreditsPrefix: string;
+  readonly mathCreditsPrefix: string;
   readonly hotseat: string;
   readonly botEasy: string;
   readonly botMedium: string;
@@ -278,6 +279,7 @@ const EN: Strings = {
   chessDrawInsufficient: "Draw by insufficient material.",
   chessStockfishThinking: "Stockfish is thinking…",
   chessEngineCreditsPrefix: "Chess AI:",
+  mathCreditsPrefix: "Math:",
   hotseat: "Hotseat (2P)",
   botEasy: "vs. Bot (Easy)",
   botMedium: "vs. Bot (Medium)",
@@ -503,6 +505,7 @@ const DE: Strings = {
   chessDrawInsufficient: "Unentschieden wegen unzureichendem Material.",
   chessStockfishThinking: "Stockfish überlegt…",
   chessEngineCreditsPrefix: "Schach-KI:",
+  mathCreditsPrefix: "Mathe:",
   hotseat: "Lokal (2 Spieler)",
   botEasy: "gegen Bot (Leicht)",
   botMedium: "gegen Bot (Mittel)",

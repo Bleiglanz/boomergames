@@ -9,6 +9,7 @@ import type {
   UserDto,
 } from "../online/session.js";
 import type { BotLevelDto, GameKindDto } from "../wasm_bridge.js";
+import { appendChatTextWithKatex } from "./chat_math.js";
 
 const AVATAR_BADGES: readonly string[] = [
   "🎱",
@@ -616,7 +617,7 @@ export class LobbyController {
           author.textContent = `${line.name}: `;
           item.append(author);
         }
-        item.append(document.createTextNode(line.text));
+        appendChatTextWithKatex(item, line.text);
         log.append(item);
       }
       queueMicrotask(() => {

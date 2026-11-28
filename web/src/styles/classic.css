@@ -1024,6 +1024,21 @@ body {
   word-break: break-word;
 }
 
+.chat-math-inline .katex {
+  font-size: 1.05em;
+  line-height: 1.2;
+}
+
+.chat-math-display {
+  display: block;
+  overflow-x: auto;
+  margin: 0.25rem 0;
+}
+
+.chat-math-display .katex-display {
+  margin: 0.2rem 0;
+}
+
 .chat-ai-line {
   background: var(--chat-ai-bg);
   border-left: 3px solid var(--chat-ai-border);

@@ -30,11 +30,12 @@ use crate::state::{AppState, CachedStatus, StatusPayload};
 /// Cache TTL for `GET /status` to avoid hammering PostgreSQL on health probes.
 const STATUS_CACHE_TTL: Duration = Duration::from_secs(3);
 
-/// Strict Content-Security-Policy matching `incubation/plan.md` §9.4 (+ Google Identity Services).
+/// Strict Content-Security-Policy matching `incubation/plan.md` §9.4 (+ Google Identity Services & `KaTeX` CDN).
 const STRICT_CSP: &str = "default-src 'self'; \
-    script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com; \
+    script-src 'self' 'wasm-unsafe-eval' https://accounts.google.com https://cdn.jsdelivr.net; \
     worker-src 'self'; \
-    style-src 'self' 'unsafe-inline' https://accounts.google.com; \
+    style-src 'self' 'unsafe-inline' https://accounts.google.com https://cdn.jsdelivr.net; \
+    font-src 'self' https://cdn.jsdelivr.net; \
     connect-src 'self' ws: wss: https://accounts.google.com; \
     frame-src https://accounts.google.com; \
     img-src 'self' data: https://lh3.googleusercontent.com; \

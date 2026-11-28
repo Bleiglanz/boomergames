@@ -221,6 +221,7 @@ Contributors should preserve these invariants:
 ## Credits & Third-Party Licenses
 
 - **Chess Engine (Single-Player)**: [Stockfish 19](https://stockfishchess.org/) compiled to WebAssembly via [nmrugg/stockfish.js](https://github.com/nmrugg/stockfish.js), licensed under the [GNU General Public License v3.0 (GPL-3.0)](https://www.gnu.org/licenses/gpl-3.0.html).
+- **Chat Math Rendering**: [KaTeX](https://katex.org/) (loaded via jsDelivr CDN with Subresource Integrity), licensed under the [MIT License](https://github.com/KaTeX/KaTeX/blob/main/LICENSE).
 - **Background Cool Jazz Music**:
   - ["Backbay Lounge"](https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1700001), ["Airport Lounge"](https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1100806), and ["Cool Vibes"](https://incompetech.com/music/royalty-free/index.html?isrc=USUAN1100863) by Kevin MacLeod ([incompetech.com](https://incompetech.com/))
   - Licensed under [Creative Commons: By Attribution 4.0 License](https://creativecommons.org/licenses/by/4.0/) *(re-encoded to 96 kbps MP3)*.
