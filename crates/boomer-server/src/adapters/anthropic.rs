@@ -10,7 +10,7 @@ use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::config::AnthropicConfig;
-use crate::ports::{AiChatContext, AiFriend, BoxFuture, PortError};
+use crate::ports::{AiChatContext, AiFriend, AiFriendAdminInfo, BoxFuture, PortError};
 
 /// Anthropic Messages API endpoint.
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -316,6 +316,57 @@ impl AiFriend for AnthropicAiFriend {
                 "dispatched Anthropic AI Friend reply"
             );
             Ok(reply)
+        })
+    }
+
+    fn admin_info(&self) -> BoxFuture<'_, AiFriendAdminInfo> {
+        Box::pin(async move {
+            let file_prompt = tokio::fs::read_to_string(&self.system_prompt_file)
+                .await
+                .ok()
+                .map(|raw| raw.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            let using_custom_file = file_prompt.is_some();
+            let active_prompt = file_prompt.unwrap_or_else(|| AI_FRIEND_SYSTEM_PROMPT.to_owned());
+            AiFriendAdminInfo {
+                configured: true,
+                model: self.model.clone(),
+                calls_used: self.calls_used.load(Ordering::Acquire),
+                max_calls: self.max_calls,
+                prompt_file: Some(self.system_prompt_file.display().to_string()),
+                active_prompt,
+                using_custom_file,
+            }
+        })
+    }
+
+    fn reset_call_counter(&self) -> u32 {
+        self.calls_used.swap(0, Ordering::AcqRel)
+    }
+
+    fn save_system_prompt(&self, prompt: &str) -> BoxFuture<'_, Result<(), PortError>> {
+        let trimmed = prompt.trim().to_owned();
+        Box::pin(async move {
+            if trimmed.is_empty() || trimmed.len() > 8_192 {
+                return Err(PortError::Invalid(
+                    "system prompt must be between 1 and 8192 bytes".to_owned(),
+                ));
+            }
+            let content = format!("{trimmed}\n");
+            tokio::fs::write(&self.system_prompt_file, content)
+                .await
+                .map_err(|err| {
+                    PortError::Unavailable(format!(
+                        "failed to write {}: {err}",
+                        self.system_prompt_file.display()
+                    ))
+                })?;
+            info!(
+                path = %self.system_prompt_file.display(),
+                chars = trimmed.chars().count(),
+                "updated AI Friend system prompt file via admin console"
+            );
+            Ok(())
         })
     }
 }

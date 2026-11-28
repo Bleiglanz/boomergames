@@ -1394,3 +1394,141 @@ body {
     height: 180px;
   }
 }
+
+/* ===== Admin Console (/antonadmin) ===== */
+
+.admin-gate-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.admin-gate-card {
+  width: min(460px, 100%);
+}
+
+.admin-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.admin-section-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.admin-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 0.6rem;
+}
+
+.admin-kpi-card {
+  background: var(--bg-card);
+  border: 2px solid var(--border-dark);
+  padding: 0.6rem 0.75rem;
+}
+
+.admin-kpi-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.admin-kpi-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  margin-top: 0.15rem;
+}
+
+.admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.admin-search {
+  max-width: 280px;
+}
+
+.admin-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-dark);
+  background: var(--bg-card);
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 0.45rem 0.55rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border-dark);
+  vertical-align: top;
+}
+
+.admin-table th {
+  background: var(--bg-panel);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.admin-mono {
+  font-family: "DejaVu Sans Mono", Consolas, monospace;
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
+.admin-badge {
+  display: inline-block;
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 0.12rem 0.42rem;
+  border: 1px solid var(--border-dark);
+  background: var(--bg-panel);
+  color: var(--text-main);
+}
+
+.admin-badge-ok {
+  background: var(--active-seat-bg);
+  border-color: var(--active-seat-border);
+}
+
+.admin-badge-warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn-text);
+}
+
+.admin-badge-danger {
+  background: var(--danger-bg);
+  border-color: var(--danger-text);
+  color: var(--danger-text);
+}
+
+.admin-chat-pre {
+  margin: 0.35rem 0 0;
+  padding: 0.45rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dark);
+  font-size: 0.78rem;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.admin-prompt-editor {
+  width: 100%;
+  min-height: 200px;
+  resize: vertical;
+  font-family: "DejaVu Sans Mono", Consolas, monospace;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}

@@ -12,8 +12,9 @@ use chrono::{DateTime, Utc};
 
 use crate::auth::{MAX_AVATAR_INDEX, validate_display_name};
 use crate::ports::{
-    BoxFuture, GoogleTokenVerifier, HealthCheck, HighscoreEntry, MailSender, MatchHistoryItem,
-    MatchRepo, PlayerStatRecord, PortError, RecordMatchInput, RecordMatchOutcome,
+    ActivityEventRecord, AdminMatchRecord, AdminRepo, AdminReportRecord, BoxFuture,
+    GoogleTokenVerifier, HealthCheck, HighscoreEntry, MailSender, MatchHistoryItem, MatchRepo,
+    NewActivityEvent, PlayerStatRecord, PortError, RecordMatchInput, RecordMatchOutcome,
     RecordedRatingChange, RecordedWinCount, ReportRepo, StatsRepo, UserRecord, UserRepo,
     VerifiedGoogleUser,
 };
@@ -23,17 +24,22 @@ struct MemData {
     users: BTreeMap<i64, UserRecord>,
     stats: BTreeMap<(i64, u8), PlayerStatRecord>,
     matches: Vec<StoredMatch>,
-    reports: Vec<(i64, String, String, Option<String>)>,
+    reports: Vec<AdminReportRecord>,
+    activity: Vec<ActivityEventRecord>,
+    settings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 struct StoredMatch {
+    id: i64,
     game: GameKind,
     player1_id: Option<i64>,
     player2_id: Option<i64>,
     player1_label: String,
     player2_label: String,
+    bot_level: Option<i16>,
     winner: Option<i16>,
+    end_reason: String,
     rated: bool,
     counts_for_highscore: bool,
     ended_at: DateTime<Utc>,
@@ -52,7 +58,9 @@ const fn game_key(game: GameKind) -> u8 {
 pub struct MemoryRepos {
     data: Mutex<MemData>,
     next_user_id: AtomicI64,
+    next_match_id: AtomicI64,
     next_report_id: AtomicI64,
+    next_activity_id: AtomicI64,
     healthy: AtomicBool,
 }
 
@@ -69,7 +77,9 @@ impl MemoryRepos {
         Self {
             data: Mutex::new(MemData::default()),
             next_user_id: AtomicI64::new(1),
+            next_match_id: AtomicI64::new(1),
             next_report_id: AtomicI64::new(1),
+            next_activity_id: AtomicI64::new(1),
             healthy: AtomicBool::new(true),
         }
     }
@@ -98,7 +108,20 @@ impl MemoryRepos {
     pub fn reports(&self) -> Vec<(i64, String, String, Option<String>)> {
         self.data
             .lock()
-            .map(|guard| guard.reports.clone())
+            .map(|guard| {
+                guard
+                    .reports
+                    .iter()
+                    .map(|r| {
+                        (
+                            r.id,
+                            r.reported_name.clone(),
+                            r.reason.clone(),
+                            r.chat_log.clone(),
+                        )
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -133,13 +156,17 @@ impl MemoryRepos {
             .data
             .lock()
             .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+        let id = self.next_match_id.fetch_add(1, Ordering::Relaxed);
         guard.matches.push(StoredMatch {
+            id,
             game,
             player1_id,
             player2_id,
             player1_label: opponent_label.clone(),
             player2_label: opponent_label,
+            bot_level: None,
             winner,
+            end_reason: "manual".to_owned(),
             rated: false,
             counts_for_highscore: false,
             ended_at: Utc::now(),
@@ -211,6 +238,8 @@ impl UserRepo for MemoryRepos {
                 banned_until: None,
                 session_version: 0,
                 created_at: Utc::now(),
+                last_login_at: None,
+                last_login_provider: None,
             };
             guard.users.insert(id, user.clone());
             Ok((user, true))
@@ -339,6 +368,54 @@ impl UserRepo for MemoryRepos {
             Ok(())
         })
     }
+
+    fn record_login(
+        &self,
+        user_id: i64,
+        provider: &str,
+        now: DateTime<Utc>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        let provider = provider.to_owned();
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            if let Some(user) = guard.users.get_mut(&user_id) {
+                user.last_login_at = Some(now);
+                user.last_login_provider = Some(provider);
+            }
+            Ok(())
+        })
+    }
+
+    fn set_moderator(
+        &self,
+        user_id: i64,
+        is_moderator: bool,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            let user = guard.users.get_mut(&user_id).ok_or(PortError::NotFound)?;
+            user.is_moderator = is_moderator;
+            Ok(())
+        })
+    }
+
+    fn list_all_users(&self) -> BoxFuture<'_, Result<Vec<UserRecord>, PortError>> {
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            let mut users: Vec<UserRecord> = guard.users.values().cloned().collect();
+            users.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+            Ok(users)
+        })
+    }
 }
 
 impl StatsRepo for MemoryRepos {
@@ -358,6 +435,16 @@ impl StatsRepo for MemoryRepos {
                 .map(|(_, rec)| rec.clone())
                 .collect();
             Ok(rows)
+        })
+    }
+
+    fn all_stats(&self) -> BoxFuture<'_, Result<Vec<PlayerStatRecord>, PortError>> {
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            Ok(guard.stats.values().cloned().collect())
         })
     }
 
@@ -461,6 +548,45 @@ impl MatchRepo for MemoryRepos {
         })
     }
 
+    fn recent_all_matches(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<AdminMatchRecord>, PortError>> {
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            Ok(guard
+                .matches
+                .iter()
+                .rev()
+                .take(limit)
+                .map(|m| AdminMatchRecord {
+                    id: m.id,
+                    game: m.game,
+                    player1_label: m.player1_label.clone(),
+                    player2_label: m.player2_label.clone(),
+                    bot_level: m.bot_level,
+                    winner: m.winner,
+                    end_reason: m.end_reason.clone(),
+                    rated: m.rated,
+                    ended_at: m.ended_at,
+                })
+                .collect())
+        })
+    }
+
+    fn total_matches(&self) -> BoxFuture<'_, Result<u64, PortError>> {
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            Ok(u64::try_from(guard.matches.len()).unwrap_or(u64::MAX))
+        })
+    }
+
     fn record_finished_match(
         &self,
         input: RecordMatchInput,
@@ -530,13 +656,17 @@ impl MatchRepo for MemoryRepos {
                 }
             }
 
+            let match_id = self.next_match_id.fetch_add(1, Ordering::Relaxed);
             guard.matches.push(StoredMatch {
+                id: match_id,
                 game: input.game,
                 player1_id: input.player1_id,
                 player2_id: input.player2_id,
                 player1_label: input.player1_label,
                 player2_label: input.player2_label,
+                bot_level: input.bot_level,
                 winner: input.winner,
+                end_reason: input.reason,
                 rated,
                 counts_for_highscore,
                 ended_at: now,
@@ -684,13 +814,13 @@ fn apply_mem_stat(
 impl ReportRepo for MemoryRepos {
     fn create_report(
         &self,
-        _reporter_id: Option<i64>,
-        _reported_id: Option<i64>,
-        reported_name: &str,
+        reporter_id: Option<i64>,
+        target_id: Option<i64>,
+        target_name: &str,
         reason: &str,
         chat_log: Option<&str>,
     ) -> BoxFuture<'_, Result<i64, PortError>> {
-        let reported_name = reported_name.to_owned();
+        let target_name = target_name.to_owned();
         let reason = reason.to_owned();
         let chat_log = chat_log.map(str::to_owned);
         Box::pin(async move {
@@ -699,8 +829,113 @@ impl ReportRepo for MemoryRepos {
                 .data
                 .lock()
                 .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
-            guard.reports.push((id, reported_name, reason, chat_log));
+            let reporter_name = reporter_id
+                .and_then(|rid| guard.users.get(&rid))
+                .map(|u| u.display_name.clone());
+            guard.reports.push(AdminReportRecord {
+                id,
+                reporter_name,
+                reported_id: target_id,
+                reported_name: target_name,
+                reason,
+                chat_log,
+                created_at: Utc::now(),
+                resolved_at: None,
+            });
             Ok(id)
+        })
+    }
+
+    fn list_reports(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<AdminReportRecord>, PortError>> {
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            Ok(guard.reports.iter().rev().take(limit).cloned().collect())
+        })
+    }
+
+    fn resolve_report(
+        &self,
+        report_id: i64,
+        _resolver_id: Option<i64>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            let rep = guard
+                .reports
+                .iter_mut()
+                .find(|r| r.id == report_id)
+                .ok_or(PortError::NotFound)?;
+            rep.resolved_at = Some(Utc::now());
+            Ok(())
+        })
+    }
+}
+
+impl AdminRepo for MemoryRepos {
+    fn record_activity(&self, event: NewActivityEvent) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let id = self.next_activity_id.fetch_add(1, Ordering::Relaxed);
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            guard.activity.push(ActivityEventRecord {
+                id,
+                event_type: event.event_type,
+                actor_user_id: event.actor_user_id,
+                actor_label: event.actor_label,
+                auth_provider: event.auth_provider,
+                game: event.game,
+                details: event.details,
+                created_at: Utc::now(),
+            });
+            Ok(())
+        })
+    }
+
+    fn recent_activity(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<ActivityEventRecord>, PortError>> {
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            Ok(guard.activity.iter().rev().take(limit).cloned().collect())
+        })
+    }
+
+    fn get_setting(&self, key: &str) -> BoxFuture<'_, Result<Option<String>, PortError>> {
+        let key = key.to_owned();
+        Box::pin(async move {
+            let guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            Ok(guard.settings.get(&key).cloned())
+        })
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> BoxFuture<'_, Result<(), PortError>> {
+        let key = key.to_owned();
+        let value = value.to_owned();
+        Box::pin(async move {
+            let mut guard = self
+                .data
+                .lock()
+                .map_err(|_| PortError::Unavailable("lock poisoned".to_owned()))?;
+            guard.settings.insert(key, value);
+            Ok(())
         })
     }
 }

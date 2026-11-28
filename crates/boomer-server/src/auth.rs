@@ -18,6 +18,34 @@ pub const SESSION_TOKEN_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 /// Guest reconnect token lifetime (24 hours).
 pub const GUEST_TOKEN_TTL_SECS: i64 = 24 * 60 * 60;
 
+/// Admin Google-authenticated session token lifetime (12 hours).
+pub const ADMIN_TOKEN_TTL_SECS: i64 = 12 * 60 * 60;
+
+/// Sole email address permitted to access `/antonadmin` (strictly via Google authentication).
+pub const ADMIN_EMAIL: &str = "antonrechenauer@gmail.com";
+
+/// Authentication provider recorded inside signed session tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthProvider {
+    /// Passwordless email magic link.
+    #[default]
+    Email,
+    /// Google Identity Services verified ID token.
+    Google,
+}
+
+impl AuthProvider {
+    /// Stable lowercase provider tag for database persistence and activity logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Email => "email",
+            Self::Google => "google",
+        }
+    }
+}
+
 /// Display name cooldown between renames (30 days per `incubation/plan.md` A-3).
 pub const NAME_CHANGE_COOLDOWN_DAYS: i64 = 30;
 
@@ -34,6 +62,20 @@ pub struct SessionClaims {
     pub user_id: i64,
     /// Must match `users.session_version` (incremented on ban / global logout).
     pub session_version: i32,
+    /// How this session was authenticated (`google` or `email`).
+    #[serde(default)]
+    pub auth_provider: AuthProvider,
+    /// Expiration Unix timestamp (seconds).
+    pub exp: i64,
+}
+
+/// Signed Google-authenticated admin payload for `/antonadmin/api/*`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminClaims {
+    /// Verified Google email address.
+    pub email: String,
+    /// Stable Google `sub` identifier.
+    pub google_sub: String,
     /// Expiration Unix timestamp (seconds).
     pub exp: i64,
 }
@@ -82,17 +124,56 @@ impl TokenSigner {
         }
     }
 
-    /// Signs a session token for `(user_id, session_version)`.
+    /// Signs a session token for `(user_id, session_version)` authenticated via Email magic link.
     ///
     /// # Errors
     /// Returns [`TokenError::Malformed`] if JSON encoding unexpectedly fails.
     pub fn sign_session(&self, user_id: i64, session_version: i32) -> Result<String, TokenError> {
+        self.sign_session_with_provider(user_id, session_version, AuthProvider::Email)
+    }
+
+    /// Signs a session token carrying an explicit [`AuthProvider`].
+    ///
+    /// # Errors
+    /// Returns [`TokenError::Malformed`] if JSON encoding unexpectedly fails.
+    pub fn sign_session_with_provider(
+        &self,
+        user_id: i64,
+        session_version: i32,
+        auth_provider: AuthProvider,
+    ) -> Result<String, TokenError> {
         let claims = SessionClaims {
             user_id,
             session_version,
+            auth_provider,
             exp: (Utc::now() + Duration::seconds(SESSION_TOKEN_TTL_SECS)).timestamp(),
         };
         self.sign_typed("s", &claims)
+    }
+
+    /// Signs a 12-hour Google-verified admin token for `/antonadmin/api/*`.
+    ///
+    /// # Errors
+    /// Returns [`TokenError::Malformed`] if JSON encoding unexpectedly fails.
+    pub fn sign_admin_google(&self, email: &str, google_sub: &str) -> Result<String, TokenError> {
+        let claims = AdminClaims {
+            email: email.to_ascii_lowercase(),
+            google_sub: google_sub.to_owned(),
+            exp: (Utc::now() + Duration::seconds(ADMIN_TOKEN_TTL_SECS)).timestamp(),
+        };
+        self.sign_typed("a", &claims)
+    }
+
+    /// Verifies and decodes a Google-verified admin token.
+    ///
+    /// # Errors
+    /// Returns [`TokenError`] if signature is invalid, malformed, or expired.
+    pub fn verify_admin_google(&self, token: &str) -> Result<AdminClaims, TokenError> {
+        let claims: AdminClaims = self.verify_typed("a", token)?;
+        if claims.exp < Utc::now().timestamp() {
+            return Err(TokenError::Expired);
+        }
+        Ok(claims)
     }
 
     /// Verifies and decodes a session token.

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use boomer_protocol::{
     ChatScopeDto, ClientMessage, ErrorCode, GameKindDto, PROTOCOL_VERSION, ServerMessage,
@@ -21,12 +22,12 @@ use tracing::{debug, warn};
 use crate::actors::ClientSink;
 use crate::actors::lobby_actor::LobbyCmd;
 use crate::actors::table_actor::{TableClient, TableCmd};
-use crate::auth::validate_email;
+use crate::auth::{AuthProvider, validate_email};
 use crate::mapping::{
     game_kind_from_dto, guest_to_user_dto, highscore_entry_to_dto, match_item_to_dto,
     parse_user_id, stat_record_to_profile_dto, user_record_to_dto,
 };
-use crate::ports::{PortError, UserRecord};
+use crate::ports::{NewActivityEvent, PortError, UserRecord};
 use crate::state::AppState;
 
 /// Maximum inbound JSON text frame size (4 KB per `incubation/plan.md` §9.6).
@@ -50,7 +51,10 @@ const MAX_RATE_STRIKES: u8 = 5;
 #[derive(Debug, Clone)]
 enum ConnIdentity {
     Guest,
-    Registered { user_id: i64 },
+    Registered {
+        user_id: i64,
+        auth_provider: AuthProvider,
+    },
 }
 
 struct ConnSession {
@@ -117,13 +121,17 @@ impl RateLimiter {
     }
 }
 
-/// `GET /ws` upgrade endpoint.
+/// `GET /ws` upgrade endpoint (returns `503 Service Unavailable` during Maintenance Mode).
 pub async fn ws_upgrade_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    if state.is_maintenance() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     ws.max_message_size(MAX_MESSAGE_BYTES * 2)
         .on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
@@ -362,8 +370,23 @@ async fn perform_handshake(
             }) {
                 return None;
             }
+            let _ = state
+                .users
+                .record_login(user.id, claims.auth_provider.as_str(), Utc::now())
+                .await;
+            state.record_activity_async(NewActivityEvent {
+                event_type: "session_resume".to_owned(),
+                actor_user_id: Some(user.id),
+                actor_label: format!("{} ({})", user.display_name, user.email),
+                auth_provider: Some(claims.auth_provider.as_str().to_owned()),
+                game: None,
+                details: None,
+            });
             return Some(ConnSession {
-                identity: ConnIdentity::Registered { user_id: user.id },
+                identity: ConnIdentity::Registered {
+                    user_id: user.id,
+                    auth_provider: claims.auth_provider,
+                },
                 user: me,
                 muted: is_muted(&user),
                 ignored: ignored_wire_set(&user),
@@ -377,7 +400,23 @@ async fn perform_handshake(
     }
 
     // Otherwise resume a valid guest reconnect token or issue a fresh guest identity.
-    let (guest_num, issued_guest_token) = if let Some(ref g_tok) = guest
+    build_guest_handshake_session(
+        guest.as_deref(),
+        out_tx,
+        slow_disconnect,
+        disconnect_notify,
+        state,
+    )
+}
+
+fn build_guest_handshake_session(
+    guest_token: Option<&str>,
+    out_tx: mpsc::Sender<Message>,
+    slow_disconnect: Arc<AtomicBool>,
+    disconnect_notify: Arc<Notify>,
+    state: &AppState,
+) -> Option<ConnSession> {
+    let (guest_num, issued_guest_token) = if let Some(g_tok) = guest_token
         && let Ok(claims) = state.signer.verify_guest(g_tok)
     {
         (claims.guest_num, None)
@@ -403,6 +442,14 @@ async fn perform_handshake(
     }) {
         return None;
     }
+    state.record_activity_async(NewActivityEvent {
+        event_type: "guest_connect".to_owned(),
+        actor_user_id: None,
+        actor_label: me.name.clone(),
+        auth_provider: None,
+        game: None,
+        details: Some("online lounge".to_owned()),
+    });
     Some(ConnSession {
         identity: ConnIdentity::Guest,
         user: me,
@@ -711,7 +758,7 @@ async fn handle_report(
         return session.send_error(ErrorCode::Invalid, "report");
     }
     let reporter_id = match session.identity {
-        ConnIdentity::Registered { user_id } => Some(user_id),
+        ConnIdentity::Registered { user_id, .. } => Some(user_id),
         ConnIdentity::Guest => None,
     };
     let target_id = parse_user_id(target_wire_id);
@@ -755,7 +802,7 @@ async fn capture_recent_chat(session: &ConnSession, state: &AppState) -> Option<
 }
 
 async fn is_caller_moderator(session: &ConnSession, state: &AppState) -> bool {
-    let ConnIdentity::Registered { user_id } = session.identity else {
+    let ConnIdentity::Registered { user_id, .. } = session.identity else {
         return false;
     };
     state
@@ -1052,7 +1099,7 @@ async fn handle_ignore_set(
         session.ignored.remove(target_wire_id);
     }
 
-    if let ConnIdentity::Registered { user_id } = session.identity
+    if let ConnIdentity::Registered { user_id, .. } = session.identity
         && let Some(target_uid) = parse_user_id(target_wire_id)
         && state
             .users
@@ -1084,7 +1131,16 @@ async fn handle_auth_magic(token: &str, session: &mut ConnSession, state: &AppSt
     let Ok(claims) = state.signer.verify_magic(token) else {
         return session.send_error(ErrorCode::Invalid, "auth.magic");
     };
-    complete_login(&claims.email, None, None, session, state, "auth.magic").await
+    complete_login(
+        &claims.email,
+        None,
+        None,
+        AuthProvider::Email,
+        session,
+        state,
+        "auth.magic",
+    )
+    .await
 }
 
 async fn handle_auth_google(id_token: &str, session: &mut ConnSession, state: &AppState) -> bool {
@@ -1095,6 +1151,7 @@ async fn handle_auth_google(id_token: &str, session: &mut ConnSession, state: &A
         &verified.email,
         Some(&verified.sub),
         verified.suggested_name.as_deref(),
+        AuthProvider::Google,
         session,
         state,
         "auth.google",
@@ -1106,6 +1163,7 @@ async fn complete_login(
     email: &str,
     google_sub: Option<&str>,
     suggested_name: Option<&str>,
+    auth_provider: AuthProvider,
     session: &mut ConnSession,
     state: &AppState,
     re: &str,
@@ -1120,14 +1178,41 @@ async fn complete_login(
     if user.banned_until.is_some_and(|until| until > Utc::now()) {
         return session.send_error(ErrorCode::Banned, re);
     }
-    let Ok(token) = state.signer.sign_session(user.id, user.session_version) else {
+    let Ok(token) =
+        state
+            .signer
+            .sign_session_with_provider(user.id, user.session_version, auth_provider)
+    else {
         return session.send_error(ErrorCode::Invalid, re);
     };
+    let _ = state
+        .users
+        .record_login(user.id, auth_provider.as_str(), Utc::now())
+        .await;
+    state.record_activity_async(NewActivityEvent {
+        event_type: match auth_provider {
+            AuthProvider::Google => "login_google",
+            AuthProvider::Email => "login_email",
+        }
+        .to_owned(),
+        actor_user_id: Some(user.id),
+        actor_label: format!("{} ({})", user.display_name, user.email),
+        auth_provider: Some(auth_provider.as_str().to_owned()),
+        game: None,
+        details: Some(if is_new {
+            "new account".to_owned()
+        } else {
+            "returning login".to_owned()
+        }),
+    });
 
     let me = user_record_to_dto(&user, 1200, 0, UserStatusDto::Available);
     switch_identity(
         session,
-        ConnIdentity::Registered { user_id: user.id },
+        ConnIdentity::Registered {
+            user_id: user.id,
+            auth_provider,
+        },
         me.clone(),
         is_muted(&user),
         ignored_wire_set(&user),
@@ -1200,7 +1285,11 @@ async fn handle_account_update(
     session: &mut ConnSession,
     state: &AppState,
 ) -> bool {
-    let ConnIdentity::Registered { user_id } = session.identity else {
+    let ConnIdentity::Registered {
+        user_id,
+        auth_provider,
+    } = session.identity
+    else {
         return session.send_error(ErrorCode::NotAllowed, "account.update");
     };
     let avatar_i16 = avatar.map(i16::from);
@@ -1210,7 +1299,11 @@ async fn handle_account_update(
         .await
     {
         Ok(user) => {
-            let Ok(token) = state.signer.sign_session(user.id, user.session_version) else {
+            let Ok(token) = state.signer.sign_session_with_provider(
+                user.id,
+                user.session_version,
+                auth_provider,
+            ) else {
                 return session.send_error(ErrorCode::Invalid, "account.update");
             };
             let me = user_record_to_dto(&user, session.user.rating, 0, session.user.status);
@@ -1231,7 +1324,7 @@ async fn handle_account_update(
 }
 
 async fn handle_account_delete(session: &ConnSession, state: &AppState) -> bool {
-    let ConnIdentity::Registered { user_id } = session.identity else {
+    let ConnIdentity::Registered { user_id, .. } = session.identity else {
         return session.send_error(ErrorCode::NotAllowed, "account.delete");
     };
     if state.users.delete_user(user_id).await.is_err() {
@@ -1279,7 +1372,7 @@ async fn handle_highscores_get(
 ) -> bool {
     let around_uid = if around {
         match session.identity {
-            ConnIdentity::Registered { user_id } => Some(user_id),
+            ConnIdentity::Registered { user_id, .. } => Some(user_id),
             ConnIdentity::Guest => None,
         }
     } else {
@@ -1299,7 +1392,7 @@ async fn handle_highscores_get(
 }
 
 async fn refresh_rating_for_game(game: GameKindDto, session: &mut ConnSession, state: &AppState) {
-    let ConnIdentity::Registered { user_id } = session.identity else {
+    let ConnIdentity::Registered { user_id, .. } = session.identity else {
         return;
     };
     let domain_game = game_kind_from_dto(game);

@@ -1,5 +1,6 @@
 //! External I/O adapters implementing server ports (HTTP, WebSocket, PostgreSQL, SMTP, Google, Anthropic, Memory).
 
+pub mod admin;
 pub mod anthropic;
 pub mod db;
 pub mod google;

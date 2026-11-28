@@ -62,6 +62,10 @@ pub struct UserRecord {
     pub session_version: i32,
     /// Member-since timestamp.
     pub created_at: DateTime<Utc>,
+    /// Most recent successful login or session resume timestamp.
+    pub last_login_at: Option<DateTime<Utc>>,
+    /// Most recent login provider (`"google"` or `"email"`).
+    pub last_login_provider: Option<String>,
 }
 
 /// Persistent per-game player rating & win counters (`player_stats` table).
@@ -171,6 +175,24 @@ pub trait UserRepo: Send + Sync {
         user_id: i64,
         until: Option<DateTime<Utc>>,
     ) -> BoxFuture<'_, Result<(), PortError>>;
+
+    /// Updates a user's `last_login_at` and `last_login_provider` timestamps.
+    fn record_login(
+        &self,
+        user_id: i64,
+        provider: &str,
+        now: DateTime<Utc>,
+    ) -> BoxFuture<'_, Result<(), PortError>>;
+
+    /// Grants or revokes moderator privileges for `user_id`.
+    fn set_moderator(
+        &self,
+        user_id: i64,
+        is_moderator: bool,
+    ) -> BoxFuture<'_, Result<(), PortError>>;
+
+    /// Lists all registered users ordered by newest registration first (for `/antonadmin`).
+    fn list_all_users(&self) -> BoxFuture<'_, Result<Vec<UserRecord>, PortError>>;
 }
 
 /// Port for per-game player ratings and the High Score leaderboard.
@@ -180,6 +202,9 @@ pub trait StatsRepo: Send + Sync {
         &self,
         user_id: i64,
     ) -> BoxFuture<'_, Result<Vec<PlayerStatRecord>, PortError>>;
+
+    /// Returns all player stat rows across all users (for `/antonadmin`).
+    fn all_stats(&self) -> BoxFuture<'_, Result<Vec<PlayerStatRecord>, PortError>>;
 
     /// Returns Top 100 High Score rows for `game`, or rows around `around_user_id` ("Find me").
     fn highscores(
@@ -249,6 +274,88 @@ pub struct RecordMatchOutcome {
     pub win_counts: Vec<RecordedWinCount>,
 }
 
+/// Summary row of a finished match exposed in `/antonadmin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminMatchRecord {
+    /// Primary key.
+    pub id: i64,
+    /// Game played.
+    pub game: GameKind,
+    /// Seat 1 display label (registered name or `"Guest"`).
+    pub player1_label: String,
+    /// Seat 2 display label (registered name, `"Guest"`, or `"House Bot (Level N)"`).
+    pub player2_label: String,
+    /// Bot difficulty when played against a House Bot.
+    pub bot_level: Option<i16>,
+    /// Winning seat (`Some(1)`, `Some(2)`, or `None` for draw).
+    pub winner: Option<i16>,
+    /// Finish reason (`"checkmate"`, `"eight_ball_pocketed"`, `"resign"`, ...).
+    pub end_reason: String,
+    /// Whether Elo rating changed.
+    pub rated: bool,
+    /// Completion timestamp.
+    pub ended_at: DateTime<Utc>,
+}
+
+/// Moderation report row exposed in `/antonadmin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminReportRecord {
+    /// Report primary key.
+    pub id: i64,
+    /// Reporter display name, if registered.
+    pub reporter_name: Option<String>,
+    /// Reported registered user ID, if applicable.
+    pub reported_id: Option<i64>,
+    /// Reported wire ID or display name.
+    pub reported_name: String,
+    /// User-supplied report reason.
+    pub reason: String,
+    /// Optional chat transcript snapshot.
+    pub chat_log: Option<String>,
+    /// Report creation timestamp.
+    pub created_at: DateTime<Utc>,
+    /// Resolution timestamp (`None` while open).
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+/// Input for persisting a timestamped activity event (login, guest play, offline play, admin action).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewActivityEvent {
+    /// Category tag (`"login_google"`, `"login_email"`, `"session_resume"`, `"guest_connect"`, `"offline_play"`, `"admin_action"`).
+    pub event_type: String,
+    /// Optional registered `users.id`.
+    pub actor_user_id: Option<i64>,
+    /// Human-readable actor label (e.g., `"Alice (alice@example.com)"`, `"Guest_1004"`, `"Anonymous (Offline)"`).
+    pub actor_label: String,
+    /// Optional auth provider (`"google"` or `"email"`).
+    pub auth_provider: Option<String>,
+    /// Optional game name (`"pool"`, `"checkers"`, `"chess"`).
+    pub game: Option<String>,
+    /// Optional short context details.
+    pub details: Option<String>,
+}
+
+/// Persisted timestamped activity event exposed in `/antonadmin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityEventRecord {
+    /// Primary key.
+    pub id: i64,
+    /// Event category tag.
+    pub event_type: String,
+    /// Optional registered user ID.
+    pub actor_user_id: Option<i64>,
+    /// Human-readable actor label.
+    pub actor_label: String,
+    /// Optional auth provider.
+    pub auth_provider: Option<String>,
+    /// Optional game name.
+    pub game: Option<String>,
+    /// Optional details.
+    pub details: Option<String>,
+    /// UTC event timestamp.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Port for finished match history & atomic post-match persistence.
 pub trait MatchRepo: Send + Sync {
     /// Returns the most recent `limit` matches involving `user_id`.
@@ -257,6 +364,15 @@ pub trait MatchRepo: Send + Sync {
         user_id: i64,
         limit: usize,
     ) -> BoxFuture<'_, Result<Vec<MatchHistoryItem>, PortError>>;
+
+    /// Returns the most recent `limit` matches across the entire site (for `/antonadmin`).
+    fn recent_all_matches(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<AdminMatchRecord>, PortError>>;
+
+    /// Returns total recorded matches across the entire site.
+    fn total_matches(&self) -> BoxFuture<'_, Result<u64, PortError>>;
 
     /// Atomically inserts the `matches` row and upserts `player_stats` (Elo + High Score wins)
     /// enforcing the 5-wins/day/opponent cap, anti-farming decay, and minimum activity threshold.
@@ -277,6 +393,37 @@ pub trait ReportRepo: Send + Sync {
         reason: &str,
         chat_log: Option<&str>,
     ) -> BoxFuture<'_, Result<i64, PortError>>;
+
+    /// Lists recent moderation reports ordered newest-first (for `/antonadmin`).
+    fn list_reports(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<AdminReportRecord>, PortError>>;
+
+    /// Marks a moderation report as resolved.
+    fn resolve_report(
+        &self,
+        report_id: i64,
+        resolver_id: Option<i64>,
+    ) -> BoxFuture<'_, Result<(), PortError>>;
+}
+
+/// Port for admin telemetry (activity log) and persistent site settings (e.g. maintenance mode).
+pub trait AdminRepo: Send + Sync {
+    /// Persists a single activity event.
+    fn record_activity(&self, event: NewActivityEvent) -> BoxFuture<'_, Result<(), PortError>>;
+
+    /// Fetches the most recent `limit` activity events ordered newest-first.
+    fn recent_activity(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<ActivityEventRecord>, PortError>>;
+
+    /// Reads a persistent site setting by key.
+    fn get_setting(&self, key: &str) -> BoxFuture<'_, Result<Option<String>, PortError>>;
+
+    /// Upserts a persistent site setting by key.
+    fn set_setting(&self, key: &str, value: &str) -> BoxFuture<'_, Result<(), PortError>>;
 }
 
 /// Port for checking backing store reachability (used by `GET /status`).
@@ -324,6 +471,25 @@ pub struct AiChatContext {
     pub recent_messages: Vec<AiChatTurn>,
 }
 
+/// Runtime status and prompt introspection of the optional AI Friend companion (for `/antonadmin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiFriendAdminInfo {
+    /// Whether an Anthropic API key is configured.
+    pub configured: bool,
+    /// Configured model ID.
+    pub model: String,
+    /// Calls consumed since startup or last counter reset.
+    pub calls_used: u32,
+    /// Hard per-run safety cap.
+    pub max_calls: u32,
+    /// Configured prompt file path, if any.
+    pub prompt_file: Option<String>,
+    /// Currently active system prompt (from file or built-in default).
+    pub active_prompt: String,
+    /// Whether the active prompt came from the custom file on disk.
+    pub using_custom_file: bool,
+}
+
 /// Port for the optional Claude AI Friend chat companion.
 pub trait AiFriend: Send + Sync {
     /// Returns `true` when an AI backend (e.g., Anthropic API key) is configured and enabled.
@@ -333,4 +499,34 @@ pub trait AiFriend: Send + Sync {
     ///
     /// Returns `Err(PortError::Conflict(_))` when the server-wide safety call budget is exhausted.
     fn generate_reply(&self, ctx: AiChatContext) -> BoxFuture<'_, Result<String, PortError>>;
+
+    /// Returns live call counters and active system prompt details for `/antonadmin`.
+    fn admin_info(&self) -> BoxFuture<'_, AiFriendAdminInfo> {
+        let configured = self.is_configured();
+        Box::pin(async move {
+            AiFriendAdminInfo {
+                configured,
+                model: String::new(),
+                calls_used: 0,
+                max_calls: 0,
+                prompt_file: None,
+                active_prompt: String::new(),
+                using_custom_file: false,
+            }
+        })
+    }
+
+    /// Resets the in-memory safety call counter and returns the previous count.
+    fn reset_call_counter(&self) -> u32 {
+        0
+    }
+
+    /// Persists an updated system prompt into the configured prompt file on disk.
+    fn save_system_prompt(&self, _prompt: &str) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            Err(PortError::Unavailable(
+                "AI Friend system prompt file is not configured".to_owned(),
+            ))
+        })
+    }
 }

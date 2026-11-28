@@ -4,18 +4,26 @@ use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, X_CONTENT_TYPE_OPTIONS,
+    CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderValue, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::compression::CompressionLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::adapters::admin::{
+    admin_ai_prompt_handler, admin_ai_reset_handler, admin_auth_google_handler,
+    admin_ban_user_handler, admin_broadcast_handler, admin_close_table_handler,
+    admin_delete_user_handler, admin_maintenance_handler, admin_moderator_handler,
+    admin_mute_user_handler, admin_overview_handler, admin_resolve_report_handler,
+    offline_play_telemetry_handler,
+};
 use crate::adapters::ws::ws_upgrade_handler;
 use crate::state::{AppState, CachedStatus, StatusPayload};
 
@@ -167,8 +175,19 @@ pub fn build_router(state: AppState) -> Router {
             HeaderValue::from_static("public, max-age=2592000"),
         ));
 
-    // SPA fallback (`index.html` is `no-cache`).
-    let spa_service = ServeDir::new(static_root).fallback(ServeFile::new(index_file));
+    // SPA fallback (`index.html` is `no-cache`), gated by Maintenance Mode.
+    let spa_service = ServeDir::new(static_root).fallback(ServeFile::new(index_file.clone()));
+    let spa_router =
+        Router::new()
+            .fallback_service(spa_service)
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                maintenance_gate,
+            ));
+
+    // Dedicated `/antonadmin` SPA shell route that stays reachable during Maintenance Mode
+    // so the Google-authenticated admin can always log in and resume the site.
+    let admin_page_service = ServeFile::new(index_file);
 
     let csp_header = HeaderValue::from_static(STRICT_CSP);
 
@@ -178,10 +197,46 @@ pub fn build_router(state: AppState) -> Router {
         .route("/about", get(impressum_handler))
         .route("/impressum", get(impressum_handler))
         .route("/ws", get(ws_upgrade_handler))
+        .route(
+            "/api/telemetry/offline",
+            post(offline_play_telemetry_handler),
+        )
+        .route_service("/antonadmin", admin_page_service.clone())
+        .route_service("/antonadmin/", admin_page_service)
+        .route(
+            "/antonadmin/api/auth/google",
+            post(admin_auth_google_handler),
+        )
+        .route("/antonadmin/api/overview", get(admin_overview_handler))
+        .route(
+            "/antonadmin/api/maintenance",
+            post(admin_maintenance_handler),
+        )
+        .route("/antonadmin/api/broadcast", post(admin_broadcast_handler))
+        .route("/antonadmin/api/users/mute", post(admin_mute_user_handler))
+        .route("/antonadmin/api/users/ban", post(admin_ban_user_handler))
+        .route(
+            "/antonadmin/api/users/moderator",
+            post(admin_moderator_handler),
+        )
+        .route(
+            "/antonadmin/api/users/delete",
+            post(admin_delete_user_handler),
+        )
+        .route(
+            "/antonadmin/api/tables/close",
+            post(admin_close_table_handler),
+        )
+        .route(
+            "/antonadmin/api/reports/resolve",
+            post(admin_resolve_report_handler),
+        )
+        .route("/antonadmin/api/ai/reset", post(admin_ai_reset_handler))
+        .route("/antonadmin/api/ai/prompt", post(admin_ai_prompt_handler))
         .merge(assets_service)
         .merge(audio_service)
         .merge(stockfish_service)
-        .fallback_service(spa_service)
+        .merge(spa_router)
         .layer(SetResponseHeaderLayer::if_not_present(
             CACHE_CONTROL,
             HeaderValue::from_static("no-cache"),
@@ -196,6 +251,51 @@ pub fn build_router(state: AppState) -> Router {
         ))
         .layer(CompressionLayer::new())
         .with_state(state)
+}
+
+async fn maintenance_gate(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    if state.is_maintenance() {
+        let escaped = html_escape(&state.maintenance_message());
+        let body = format!(
+            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>Boomergames — Maintenance</title>\
+             <style>body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
+             background:#cdd9dc;color:#182226;font-family:Verdana,Tahoma,sans-serif;padding:1.5rem}}\
+             .card{{max-width:520px;background:#f8f6ec;border:2px solid #4f6469;padding:1.5rem 1.75rem}}\
+             h1{{margin:0 0 .65rem;font-size:1.35rem;color:#215b6d}}p{{margin:.45rem 0;line-height:1.5}}\
+             .muted{{color:#405359;font-size:.9rem}}</style></head>\
+             <body><main class=\"card\"><h1>Boomergames — Maintenance Mode / Wartungsmodus</h1>\
+             <p>{escaped}</p>\
+             <p class=\"muted\">Please check back shortly. / Bitte schau gleich wieder vorbei.</p>\
+             </main></body></html>"
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (CONTENT_TYPE, "text/html; charset=utf-8"),
+                (RETRY_AFTER, "120"),
+            ],
+            body,
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+fn html_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -225,6 +325,7 @@ async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
         games: state.games.load(Ordering::Relaxed),
         google_client_id: state.config.google_client_id.clone(),
         ai_friend_available: state.ai_friend.is_configured(),
+        maintenance: state.is_maintenance(),
     };
 
     {

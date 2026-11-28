@@ -11,9 +11,10 @@ use sqlx::{PgPool, Row};
 use crate::auth::{MAX_AVATAR_INDEX, validate_display_name};
 use crate::mapping::{game_kind_from_db, game_kind_to_db};
 use crate::ports::{
-    BoxFuture, HealthCheck, HighscoreEntry, MatchHistoryItem, MatchRepo, PlayerStatRecord,
-    PortError, RecordMatchInput, RecordMatchOutcome, RecordedRatingChange, RecordedWinCount,
-    ReportRepo, StatsRepo, UserRecord, UserRepo,
+    ActivityEventRecord, AdminMatchRecord, AdminRepo, AdminReportRecord, BoxFuture, HealthCheck,
+    HighscoreEntry, MatchHistoryItem, MatchRepo, NewActivityEvent, PlayerStatRecord, PortError,
+    RecordMatchInput, RecordMatchOutcome, RecordedRatingChange, RecordedWinCount, ReportRepo,
+    StatsRepo, UserRecord, UserRepo,
 };
 
 /// PostgreSQL adapter implementing all server persistence ports.
@@ -57,22 +58,25 @@ impl PgRepos {
             banned_until: row.try_get("banned_until").map_err(map_err)?,
             session_version: row.try_get("session_version").map_err(map_err)?,
             created_at: row.try_get("created_at").map_err(map_err)?,
+            last_login_at: row.try_get("last_login_at").map_err(map_err)?,
+            last_login_provider: row.try_get("last_login_provider").map_err(map_err)?,
         })
     }
 }
 
+const USER_SELECT_COLS: &str = "id, email::text, google_sub, display_name::text, name_changed_at, \
+     avatar, ignored_ids, is_moderator, muted_until, banned_until, session_version, created_at, \
+     last_login_at, last_login_provider";
+
 impl UserRepo for PgRepos {
     fn find_by_id(&self, id: i64) -> BoxFuture<'_, Result<Option<UserRecord>, PortError>> {
         Box::pin(async move {
-            let row = sqlx::query(
-                "SELECT id, email::text, google_sub, display_name::text, name_changed_at, \
-                 avatar, ignored_ids, is_moderator, muted_until, banned_until, session_version, created_at \
-                 FROM users WHERE id = $1",
-            )
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            let query = format!("SELECT {USER_SELECT_COLS} FROM users WHERE id = $1");
+            let row = sqlx::query(&query)
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
 
             row.as_ref().map(Self::row_to_user).transpose()
         })
@@ -89,15 +93,12 @@ impl UserRepo for PgRepos {
         let suggested = suggested_name.map(str::to_owned);
 
         Box::pin(async move {
-            if let Some(row) = sqlx::query(
-                "SELECT id, email::text, google_sub, display_name::text, name_changed_at, \
-                 avatar, ignored_ids, is_moderator, muted_until, banned_until, session_version, created_at \
-                 FROM users WHERE email = $1",
-            )
-            .bind(&email_norm)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| PortError::Unavailable(e.to_string()))?
+            let find_q = format!("SELECT {USER_SELECT_COLS} FROM users WHERE email = $1");
+            if let Some(row) = sqlx::query(&find_q)
+                .bind(&email_norm)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?
             {
                 let mut user = Self::row_to_user(&row)?;
                 if user.google_sub.is_none()
@@ -119,17 +120,17 @@ impl UserRepo for PgRepos {
                 .and_then(|s| validate_display_name(s).ok())
                 .unwrap_or_else(|| format!("Player_{suffix}"));
 
-            let row = sqlx::query(
+            let insert_q = format!(
                 "INSERT INTO users (email, google_sub, display_name) VALUES ($1, $2, $3) \
-                 RETURNING id, email::text, google_sub, display_name::text, name_changed_at, \
-                 avatar, ignored_ids, is_moderator, muted_until, banned_until, session_version, created_at",
-            )
-            .bind(&email_norm)
-            .bind(&google_sub)
-            .bind(&initial_name)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+                 RETURNING {USER_SELECT_COLS}"
+            );
+            let row = sqlx::query(&insert_q)
+                .bind(&email_norm)
+                .bind(&google_sub)
+                .bind(&initial_name)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
 
             Ok((Self::row_to_user(&row)?, true))
         })
@@ -166,26 +167,25 @@ impl UserRepo for PgRepos {
 
             let final_avatar = new_avatar.unwrap_or(existing.avatar);
 
-            let row = sqlx::query(
+            let update_q = format!(
                 "UPDATE users SET display_name = $1, name_changed_at = $2, avatar = $3 \
-                 WHERE id = $4 \
-                 RETURNING id, email::text, google_sub, display_name::text, name_changed_at, \
-                 avatar, ignored_ids, is_moderator, muted_until, banned_until, session_version, created_at",
-            )
-            .bind(&final_name)
-            .bind(final_changed_at)
-            .bind(final_avatar)
-            .bind(user_id)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("unique") || msg.contains("23505") {
-                    PortError::Conflict("display name taken".to_owned())
-                } else {
-                    PortError::Unavailable(msg)
-                }
-            })?;
+                 WHERE id = $4 RETURNING {USER_SELECT_COLS}"
+            );
+            let row = sqlx::query(&update_q)
+                .bind(&final_name)
+                .bind(final_changed_at)
+                .bind(final_avatar)
+                .bind(user_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.contains("unique") || msg.contains("23505") {
+                        PortError::Conflict("display name taken".to_owned())
+                    } else {
+                        PortError::Unavailable(msg)
+                    }
+                })?;
 
             Self::row_to_user(&row)
         })
@@ -275,6 +275,61 @@ impl UserRepo for PgRepos {
             Ok(())
         })
     }
+
+    fn record_login(
+        &self,
+        user_id: i64,
+        provider: &str,
+        now: DateTime<Utc>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        let provider = provider.to_owned();
+        Box::pin(async move {
+            let _ = sqlx::query(
+                "UPDATE users SET last_login_at = $2, last_login_provider = $3 WHERE id = $1",
+            )
+            .bind(user_id)
+            .bind(now)
+            .bind(provider)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    fn set_moderator(
+        &self,
+        user_id: i64,
+        is_moderator: bool,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let res = sqlx::query("UPDATE users SET is_moderator = $2 WHERE id = $1")
+                .bind(user_id)
+                .bind(is_moderator)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            if res.rows_affected() == 0 {
+                return Err(PortError::NotFound);
+            }
+            Ok(())
+        })
+    }
+
+    fn list_all_users(&self) -> BoxFuture<'_, Result<Vec<UserRecord>, PortError>> {
+        Box::pin(async move {
+            let query = format!("SELECT {USER_SELECT_COLS} FROM users ORDER BY created_at DESC");
+            let rows = sqlx::query(&query)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in &rows {
+                out.push(Self::row_to_user(row)?);
+            }
+            Ok(out)
+        })
+    }
 }
 
 impl StatsRepo for PgRepos {
@@ -288,6 +343,49 @@ impl StatsRepo for PgRepos {
                  FROM player_stats WHERE user_id = $1",
             )
             .bind(user_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let game_str: String = row
+                    .try_get("game")
+                    .map_err(|e| PortError::Unavailable(e.to_string()))?;
+                if let Some(game) = game_kind_from_db(&game_str) {
+                    out.push(PlayerStatRecord {
+                        user_id: row
+                            .try_get("user_id")
+                            .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                        game,
+                        rating: row
+                            .try_get("rating")
+                            .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                        rated_games: row
+                            .try_get("rated_games")
+                            .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                        games: row
+                            .try_get("games")
+                            .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                        wins: row
+                            .try_get("wins")
+                            .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                        wins_reached_at: row
+                            .try_get("wins_reached_at")
+                            .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    });
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    fn all_stats(&self) -> BoxFuture<'_, Result<Vec<PlayerStatRecord>, PortError>> {
+        Box::pin(async move {
+            let rows = sqlx::query(
+                "SELECT user_id, game, rating, rated_games, games, wins, wins_reached_at \
+                 FROM player_stats",
+            )
             .fetch_all(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(e.to_string()))?;
@@ -463,6 +561,88 @@ impl MatchRepo for PgRepos {
         })
     }
 
+    fn recent_all_matches(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<AdminMatchRecord>, PortError>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(100);
+        Box::pin(async move {
+            let rows = sqlx::query(
+                "SELECT m.id, m.game, m.bot_level, m.winner, m.end_reason, m.rated, m.ended_at, \
+                 u1.display_name::text AS p1_name, u2.display_name::text AS p2_name \
+                 FROM matches m \
+                 LEFT JOIN users u1 ON u1.id = m.player1_id \
+                 LEFT JOIN users u2 ON u2.id = m.player2_id \
+                 ORDER BY m.ended_at DESC \
+                 LIMIT $1",
+            )
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let game_str: String = row
+                    .try_get("game")
+                    .map_err(|e| PortError::Unavailable(e.to_string()))?;
+                let Some(game) = game_kind_from_db(&game_str) else {
+                    continue;
+                };
+                let bot_level: Option<i16> = row
+                    .try_get("bot_level")
+                    .map_err(|e| PortError::Unavailable(e.to_string()))?;
+                let p1_name: Option<String> = row
+                    .try_get("p1_name")
+                    .map_err(|e| PortError::Unavailable(e.to_string()))?;
+                let p2_name: Option<String> = row
+                    .try_get("p2_name")
+                    .map_err(|e| PortError::Unavailable(e.to_string()))?;
+                let player1_label = p1_name.unwrap_or_else(|| "Guest".to_owned());
+                let player2_label = if let Some(lvl) = bot_level {
+                    format!("House Bot (Level {lvl})")
+                } else {
+                    p2_name.unwrap_or_else(|| "Guest".to_owned())
+                };
+                out.push(AdminMatchRecord {
+                    id: row
+                        .try_get("id")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    game,
+                    player1_label,
+                    player2_label,
+                    bot_level,
+                    winner: row
+                        .try_get("winner")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    end_reason: row
+                        .try_get("end_reason")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    rated: row
+                        .try_get("rated")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    ended_at: row
+                        .try_get("ended_at")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn total_matches(&self) -> BoxFuture<'_, Result<u64, PortError>> {
+        Box::pin(async move {
+            let row = sqlx::query("SELECT COUNT(*) AS cnt FROM matches")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            let cnt: i64 = row
+                .try_get("cnt")
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            Ok(u64::try_from(cnt).unwrap_or(0))
+        })
+    }
+
     fn record_finished_match(
         &self,
         input: RecordMatchInput,
@@ -519,7 +699,7 @@ async fn pg_record_finished_match(
     );
 
     let _ = sqlx::query(
-        "INSERT INTO matches (game, player1_id, player2_id, bot_level, winner, reason, rated, counts_for_highscore) \
+        "INSERT INTO matches (game, player1_id, player2_id, bot_level, winner, end_reason, rated, counts_for_highscore) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(game_str)
@@ -717,6 +897,184 @@ impl ReportRepo for PgRepos {
 
             row.try_get("id")
                 .map_err(|e| PortError::Unavailable(e.to_string()))
+        })
+    }
+
+    fn list_reports(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<AdminReportRecord>, PortError>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(100);
+        Box::pin(async move {
+            let rows = sqlx::query(
+                "SELECT r.id, u.display_name::text AS reporter_name, r.reported_id, \
+                 r.reported_name, r.reason, r.chat_log, r.created_at, r.resolved_at \
+                 FROM reports r \
+                 LEFT JOIN users u ON u.id = r.reporter_id \
+                 ORDER BY r.created_at DESC \
+                 LIMIT $1",
+            )
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(AdminReportRecord {
+                    id: row
+                        .try_get("id")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    reporter_name: row
+                        .try_get("reporter_name")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    reported_id: row
+                        .try_get("reported_id")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    reported_name: row
+                        .try_get("reported_name")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    reason: row
+                        .try_get("reason")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    chat_log: row
+                        .try_get("chat_log")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    created_at: row
+                        .try_get("created_at")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    resolved_at: row
+                        .try_get("resolved_at")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn resolve_report(
+        &self,
+        report_id: i64,
+        resolver_id: Option<i64>,
+    ) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let res = sqlx::query(
+                "UPDATE reports SET resolved_at = now(), resolved_by = $2 WHERE id = $1",
+            )
+            .bind(report_id)
+            .bind(resolver_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            if res.rows_affected() == 0 {
+                return Err(PortError::NotFound);
+            }
+            Ok(())
+        })
+    }
+}
+
+impl AdminRepo for PgRepos {
+    fn record_activity(&self, event: NewActivityEvent) -> BoxFuture<'_, Result<(), PortError>> {
+        Box::pin(async move {
+            let _ = sqlx::query(
+                "INSERT INTO activity_events \
+                 (event_type, actor_user_id, actor_label, auth_provider, game, details) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(event.event_type)
+            .bind(event.actor_user_id)
+            .bind(event.actor_label)
+            .bind(event.auth_provider)
+            .bind(event.game)
+            .bind(event.details)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    fn recent_activity(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<'_, Result<Vec<ActivityEventRecord>, PortError>> {
+        let limit_i64 = i64::try_from(limit).unwrap_or(200);
+        Box::pin(async move {
+            let rows = sqlx::query(
+                "SELECT id, event_type, actor_user_id, actor_label, auth_provider, game, details, created_at \
+                 FROM activity_events \
+                 ORDER BY created_at DESC \
+                 LIMIT $1",
+            )
+            .bind(limit_i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                out.push(ActivityEventRecord {
+                    id: row
+                        .try_get("id")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    event_type: row
+                        .try_get("event_type")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    actor_user_id: row
+                        .try_get("actor_user_id")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    actor_label: row
+                        .try_get("actor_label")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    auth_provider: row
+                        .try_get("auth_provider")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    game: row
+                        .try_get("game")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    details: row
+                        .try_get("details")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                    created_at: row
+                        .try_get("created_at")
+                        .map_err(|e| PortError::Unavailable(e.to_string()))?,
+                });
+            }
+            Ok(out)
+        })
+    }
+
+    fn get_setting(&self, key: &str) -> BoxFuture<'_, Result<Option<String>, PortError>> {
+        let key = key.to_owned();
+        Box::pin(async move {
+            let row = sqlx::query("SELECT value FROM site_settings WHERE key = $1")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            row.map(|r| {
+                r.try_get("value")
+                    .map_err(|e| PortError::Unavailable(e.to_string()))
+            })
+            .transpose()
+        })
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> BoxFuture<'_, Result<(), PortError>> {
+        let key = key.to_owned();
+        let value = value.to_owned();
+        Box::pin(async move {
+            let _ = sqlx::query(
+                "INSERT INTO site_settings (key, value, updated_at) VALUES ($1, $2, now()) \
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+            )
+            .bind(key)
+            .bind(value)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(e.to_string()))?;
+            Ok(())
         })
     }
 }

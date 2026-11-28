@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use boomer_server::adapters::admin::{SETTING_MAINTENANCE_ENABLED, SETTING_MAINTENANCE_MESSAGE};
 use boomer_server::adapters::anthropic::{AnthropicAiFriend, DisabledAiFriend};
 use boomer_server::adapters::db::PgRepos;
 use boomer_server::adapters::google::{GoogleIdTokenVerifier, UnconfiguredGoogleVerifier};
@@ -11,8 +12,8 @@ use boomer_server::adapters::mail::{LettreMailSender, LogMailSender};
 use boomer_server::adapters::memory::MemoryRepos;
 use boomer_server::auth::TokenSigner;
 use boomer_server::ports::{
-    AiFriend, GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo, StatsRepo,
-    UserRepo,
+    AdminRepo, AiFriend, GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo,
+    StatsRepo, UserRepo,
 };
 use boomer_server::{AppState, ServerConfig, build_router};
 use tokio::net::TcpListener;
@@ -24,6 +25,7 @@ struct RepoBundle {
     stats: Arc<dyn StatsRepo>,
     matches: Arc<dyn MatchRepo>,
     reports: Arc<dyn ReportRepo>,
+    admin: Arc<dyn AdminRepo>,
     health: Arc<dyn HealthCheck>,
 }
 
@@ -42,6 +44,7 @@ async fn main() {
                     stats: pg.clone(),
                     matches: pg.clone(),
                     reports: pg.clone(),
+                    admin: pg.clone(),
                     health: pg,
                 }
             }
@@ -58,6 +61,7 @@ async fn main() {
             stats: mem.clone(),
             matches: mem.clone(),
             reports: mem.clone(),
+            admin: mem.clone(),
             health: mem,
         }
     };
@@ -86,22 +90,7 @@ async fn main() {
         |client_id| Arc::new(GoogleIdTokenVerifier::new(client_id.clone())),
     );
 
-    let ai_friend: Arc<dyn AiFriend> = config.anthropic.as_ref().map_or_else(
-        || {
-            info!("ANTHROPIC_API_KEY not set; AI Friend chat companion disabled");
-            Arc::new(DisabledAiFriend) as Arc<dyn AiFriend>
-        },
-        |anthropic| {
-            info!(
-                model = %anthropic.model,
-                max_tokens = anthropic.max_tokens,
-                max_calls = anthropic.max_calls,
-                system_prompt_file = %anthropic.system_prompt_file.display(),
-                "configured Anthropic AI Friend chat companion"
-            );
-            Arc::new(AnthropicAiFriend::new(anthropic))
-        },
-    );
+    let ai_friend = build_ai_friend(&config);
 
     let signer = Arc::new(TokenSigner::new(config.session_secret.as_bytes()));
     let state = AppState::new(
@@ -115,7 +104,11 @@ async fn main() {
         mailer,
         google,
     )
+    .with_admin_repo(repos.admin)
     .with_ai_friend(ai_friend);
+
+    // Restore persisted maintenance mode across server restarts.
+    restore_persisted_maintenance(&state).await;
 
     let drain_hub = Arc::clone(&state.hub);
     let router = build_router(state);
@@ -134,6 +127,47 @@ async fn main() {
         .await
     {
         error!(%err, "axum server terminated with error");
+    }
+}
+
+fn build_ai_friend(config: &ServerConfig) -> Arc<dyn AiFriend> {
+    config.anthropic.as_ref().map_or_else(
+        || {
+            info!("ANTHROPIC_API_KEY not set; AI Friend chat companion disabled");
+            Arc::new(DisabledAiFriend) as Arc<dyn AiFriend>
+        },
+        |anthropic| {
+            info!(
+                model = %anthropic.model,
+                max_tokens = anthropic.max_tokens,
+                max_calls = anthropic.max_calls,
+                system_prompt_file = %anthropic.system_prompt_file.display(),
+                "configured Anthropic AI Friend chat companion"
+            );
+            Arc::new(AnthropicAiFriend::new(anthropic))
+        },
+    )
+}
+
+async fn restore_persisted_maintenance(state: &AppState) {
+    let persisted_maint = state
+        .admin
+        .get_setting(SETTING_MAINTENANCE_ENABLED)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    let persisted_msg = state
+        .admin
+        .get_setting(SETTING_MAINTENANCE_MESSAGE)
+        .await
+        .ok()
+        .flatten();
+    if persisted_maint || persisted_msg.is_some() {
+        state.set_maintenance(persisted_maint, persisted_msg.as_deref());
+        if persisted_maint {
+            warn!("restored active Maintenance Mode from database");
+        }
     }
 }
 

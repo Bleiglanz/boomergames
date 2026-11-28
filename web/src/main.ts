@@ -12,6 +12,7 @@ import {
 } from "./online/session.js";
 import { loadPrefs, savePrefs, THEME_IDS, type ThemeId, type UserPrefs } from "./prefs.js";
 import { StageRenderer } from "./render/renderer.js";
+import { mountAdminPage } from "./ui/admin.js";
 import { LobbyController } from "./ui/lobby.js";
 import {
   RemoteWasmBridge,
@@ -357,8 +358,20 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  const bridge = await WasmBridge.create();
   let prefs: UserPrefs = loadPrefs();
+  document.documentElement.dataset.theme = prefs.theme;
+  document.documentElement.dataset.contrast =
+    prefs.theme === "high_contrast" ? "high" : "standard";
+
+  if (
+    window.location.pathname === "/antonadmin" ||
+    window.location.pathname === "/antonadmin/"
+  ) {
+    mountAdminPage(root);
+    return;
+  }
+
+  const bridge = await WasmBridge.create();
   const synth = new SoundSynth(prefs.muted, prefs.volume);
   const music = new MusicPlayer(prefs.musicEnabled, prefs.muted, prefs.volume, prefs.musicTrack);
   const stockfish = new StockfishEngine();
@@ -659,6 +672,23 @@ async function bootstrap(): Promise<void> {
     } else {
       changed = bridge.dispatch(input);
       synth.playAll(bridge.drainSoundCues());
+      if (changed && input.kind === "start_local_game") {
+        const payload: Record<string, string> = {
+          game: input.game,
+          mode: input.mode.kind,
+        };
+        if (input.mode.kind === "vs_bot") {
+          payload.level = input.mode.level;
+        }
+        void fetch("/api/telemetry/offline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          keepalive: true,
+        }).catch(() => {
+          // Ignore on static offline hosts without a backend.
+        });
+      }
     }
 
     if (changed) {

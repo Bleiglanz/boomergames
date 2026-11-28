@@ -435,6 +435,12 @@ impl LobbyHub {
     pub fn disconnect_all_clients(&self) -> usize {
         self.shutting_down.store(true, Ordering::Release);
         self.shutdown_notify.notify_waiters();
+        self.kick_all_connected_clients()
+    }
+
+    /// Cleanly disconnects all currently registered WebSocket clients without triggering server
+    /// shutdown (used when admin enables Maintenance Mode).
+    pub fn kick_all_connected_clients(&self) -> usize {
         if let Ok(guard) = self.connected_sinks.read() {
             for sink in guard.values() {
                 sink.force_disconnect();
@@ -442,6 +448,55 @@ impl LobbyHub {
             return guard.len();
         }
         0
+    }
+
+    /// Broadcasts a system notice into all connected clients' chat feeds and returns recipient count.
+    pub fn broadcast_system_notice(&self, text: &str) -> usize {
+        let notice = ServerMessage::Chat {
+            scope: ChatScopeDto::Lobby,
+            line: ChatLineDto {
+                from: None,
+                name: None,
+                text: text.to_owned(),
+                ts: Utc::now().timestamp_millis(),
+                sys: true,
+                ai: false,
+            },
+        };
+        if let Ok(guard) = self.connected_sinks.read() {
+            broadcast_msg(guard.values(), &notice);
+            return guard.len();
+        }
+        0
+    }
+
+    /// Returns wire IDs of all currently connected WebSocket sessions (`"u123"` or `"g1000"`).
+    #[must_use]
+    pub fn connected_wire_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .connected_sinks
+            .read()
+            .map(|guard| guard.keys().cloned().collect())
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    /// Returns `(table_id, room_id)` pairs for all currently active tables.
+    #[must_use]
+    pub fn active_tables(&self) -> Vec<(String, String)> {
+        let mut list: Vec<(String, String)> = self
+            .tables
+            .read()
+            .map(|guard| {
+                guard
+                    .values()
+                    .map(|h| (h.table_id.clone(), h.room_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        list.sort();
+        list
     }
 
     /// Records a disconnect-forfeit abandonment strike; after 3 in 1 hour applies a 5-min cooldown.

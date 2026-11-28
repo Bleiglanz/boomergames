@@ -1,7 +1,7 @@
 //! Shared application state injected into `axum` handlers and WebSocket connections.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use boomer_protocol::RoomSummaryDto;
@@ -10,12 +10,17 @@ use tokio::sync::Mutex;
 
 use crate::actors::hub::LobbyHub;
 use crate::adapters::anthropic::DisabledAiFriend;
+use crate::adapters::memory::MemoryRepos;
 use crate::auth::TokenSigner;
 use crate::config::ServerConfig;
 use crate::ports::{
-    AiFriend, GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, ReportRepo, StatsRepo,
-    UserRepo,
+    AdminRepo, AiFriend, GoogleTokenVerifier, HealthCheck, MailSender, MatchRepo, NewActivityEvent,
+    ReportRepo, StatsRepo, UserRepo,
 };
+
+/// Default notice displayed to visitors while Maintenance Mode is active.
+pub const DEFAULT_MAINTENANCE_MESSAGE: &str =
+    "Boomergames is briefly down for maintenance. We'll be right back!";
 
 /// JSON payload returned by public `GET /status`.
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +45,8 @@ pub struct StatusPayload {
     pub google_client_id: Option<String>,
     /// Whether the optional Claude AI Friend chat companion is configured.
     pub ai_friend_available: bool,
+    /// Whether Maintenance Mode is currently active.
+    pub maintenance: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +71,8 @@ pub struct AppState {
     pub matches: Arc<dyn MatchRepo>,
     /// Moderation report persistence port.
     pub reports: Arc<dyn ReportRepo>,
+    /// Admin telemetry & persistent site settings port.
+    pub admin: Arc<dyn AdminRepo>,
     /// Database health check port.
     pub health: Arc<dyn HealthCheck>,
     /// Passwordless email magic-link port.
@@ -82,6 +91,8 @@ pub struct AppState {
     pub games: Arc<AtomicU32>,
     /// Acyclic actor hub managing all lounge rooms and tables.
     pub hub: Arc<LobbyHub>,
+    maintenance_enabled: Arc<AtomicBool>,
+    maintenance_message: Arc<RwLock<String>>,
     next_guest_num: Arc<AtomicU32>,
     pub(crate) status_cache: Arc<Mutex<Option<CachedStatus>>>,
 }
@@ -122,6 +133,7 @@ impl AppState {
             stats,
             matches,
             reports,
+            admin: Arc::new(MemoryRepos::new()),
             health,
             mailer,
             google,
@@ -131,9 +143,59 @@ impl AppState {
             tables,
             games,
             hub,
+            maintenance_enabled: Arc::new(AtomicBool::new(false)),
+            maintenance_message: Arc::new(RwLock::new(DEFAULT_MAINTENANCE_MESSAGE.to_owned())),
             next_guest_num: Arc::new(AtomicU32::new(1000)),
             status_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Injects the concrete [`AdminRepo`] persistence adapter (PostgreSQL or shared [`MemoryRepos`]).
+    #[must_use]
+    pub fn with_admin_repo(mut self, admin: Arc<dyn AdminRepo>) -> Self {
+        self.admin = admin;
+        self
+    }
+
+    /// Returns whether Maintenance Mode is currently active.
+    #[must_use]
+    pub fn is_maintenance(&self) -> bool {
+        self.maintenance_enabled.load(Ordering::Acquire)
+    }
+
+    /// Returns the active maintenance banner message.
+    #[must_use]
+    pub fn maintenance_message(&self) -> String {
+        self.maintenance_message
+            .read()
+            .map_or_else(|_| DEFAULT_MAINTENANCE_MESSAGE.to_owned(), |g| g.clone())
+    }
+
+    /// Updates the in-memory maintenance mode state and message.
+    pub fn set_maintenance(&self, enabled: bool, message: Option<&str>) {
+        self.maintenance_enabled.store(enabled, Ordering::Release);
+        if let Some(raw) = message {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty()
+                && let Ok(mut guard) = self.maintenance_message.write()
+            {
+                *guard = trimmed.chars().take(300).collect();
+            }
+        }
+    }
+
+    /// Invalidates the cached `GET /status` response so status changes appear immediately.
+    pub async fn clear_status_cache(&self) {
+        let mut guard = self.status_cache.lock().await;
+        *guard = None;
+    }
+
+    /// Asynchronously records a telemetry/audit activity event without blocking the caller.
+    pub fn record_activity_async(&self, event: NewActivityEvent) {
+        let admin = Arc::clone(&self.admin);
+        tokio::spawn(async move {
+            let _ = admin.record_activity(event).await;
+        });
     }
 
     /// Replaces the [`AiFriend`] port and rebuilds [`LobbyHub`] so lounges reflect availability.
