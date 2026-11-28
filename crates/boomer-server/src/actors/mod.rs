@@ -14,11 +14,12 @@ pub mod hub;
 pub mod lobby_actor;
 pub mod table_actor;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::ws::Message;
-use boomer_protocol::{BotLevelDto, ServerMessage, UserDto, UserStatusDto};
+use boomer_protocol::{BotLevelDto, ChatLineDto, ServerMessage, UserDto, UserStatusDto};
 use tokio::sync::{Notify, mpsc};
 
 /// Maximum chat line length in UTF-8 characters (`incubation/plan.md` §9.6).
@@ -26,6 +27,23 @@ pub const MAX_CHAT_CHARS: usize = 300;
 
 /// Maximum retained chat lines per lobby room or table in memory.
 pub const MAX_CHAT_HISTORY: usize = 50;
+
+/// Maximum retention period for in-memory lobby and table chat messages (24 hours).
+pub const CHAT_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
+
+/// Removes chat lines that are at least `retention_ms` old relative to `now_ms`.
+pub fn prune_expired_chat_with_ttl(
+    chat: &mut VecDeque<ChatLineDto>,
+    now_ms: i64,
+    retention_ms: i64,
+) {
+    chat.retain(|line| now_ms.saturating_sub(line.ts) < retention_ms);
+}
+
+/// Removes chat lines older than 24 hours ([`CHAT_RETENTION_MS`]) from an in-memory chat buffer.
+pub fn prune_expired_chat(chat: &mut VecDeque<ChatLineDto>, now_ms: i64) {
+    prune_expired_chat_with_ttl(chat, now_ms, CHAT_RETENTION_MS);
+}
 
 /// Chat profanity blocklist replaced with `***` (case-insensitive word/substring filter).
 const CHAT_PROFANITY: &[&str] = &[
@@ -183,5 +201,29 @@ mod tests {
             sanitize_chat_text("What the FUCK, nice shot!").as_deref(),
             Some("What the ***, nice shot!")
         );
+    }
+
+    #[test]
+    fn prune_expired_chat_removes_messages_older_than_24_hours() {
+        let now_ms: i64 = 1_800_000_000_000;
+        let mk = |age_ms: i64, text: &str| ChatLineDto {
+            from: Some("u1".to_owned()),
+            name: Some("Alice".to_owned()),
+            text: text.to_owned(),
+            ts: now_ms - age_ms,
+            sys: false,
+            ai: false,
+        };
+        let mut chat = VecDeque::from([
+            mk(CHAT_RETENTION_MS + 60_000, "old-over-24h"),
+            mk(CHAT_RETENTION_MS, "exact-24h-boundary"),
+            mk(CHAT_RETENTION_MS - 1_000, "almost-24h"),
+            mk(5_000, "fresh"),
+        ]);
+
+        prune_expired_chat(&mut chat, now_ms);
+
+        let texts: Vec<&str> = chat.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, vec!["almost-24h", "fresh"]);
     }
 }

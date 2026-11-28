@@ -17,7 +17,9 @@ use crate::actors::ai_chat::{
 };
 use crate::actors::hub::LobbyHub;
 use crate::actors::table_actor::{TableActor, TableClient, TableCmd, TableInit};
-use crate::actors::{ClientSink, MAX_CHAT_HISTORY, broadcast_msg, sanitize_chat_text};
+use crate::actors::{
+    ClientSink, MAX_CHAT_HISTORY, broadcast_msg, prune_expired_chat, sanitize_chat_text,
+};
 use crate::ports::{AiChatContext, PortError};
 
 /// Room chat rate limit (1 msg/s per `incubation/plan.md` §9.6).
@@ -357,6 +359,7 @@ impl LobbyActor {
                 accept,
             } => self.handle_answer_invite(&user_id, &invite_id, accept),
             LobbyCmd::DumpChat { reply } => {
+                self.prune_expired_chat();
                 let transcript = self
                     .chat
                     .iter()
@@ -443,6 +446,7 @@ impl LobbyActor {
         self.hub.update_room_users(&self.room_id, count);
         self.hub.ensure_room_capacity(self.game);
 
+        self.prune_expired_chat();
         Ok(LobbySnapshotDto {
             room: self.room_id.clone(),
             game: self.game,
@@ -571,6 +575,7 @@ impl LobbyActor {
         else {
             return;
         };
+        self.prune_expired_chat();
         let ctx = AiChatContext {
             setting: format!(
                 "{} Social Lounge ({}, {} players in room)",
@@ -624,7 +629,12 @@ impl LobbyActor {
         });
     }
 
+    fn prune_expired_chat(&mut self) {
+        prune_expired_chat(&mut self.chat, Utc::now().timestamp_millis());
+    }
+
     fn push_chat_and_broadcast(&mut self, line: ChatLineDto) {
+        self.prune_expired_chat();
         if self.chat.len() >= MAX_CHAT_HISTORY {
             let _ = self.chat.pop_front();
         }
@@ -842,6 +852,7 @@ impl LobbyActor {
 
     fn on_tick(&mut self) {
         let now = Instant::now();
+        self.prune_expired_chat();
 
         // 1. Expire invites older than 30 seconds.
         let expired_ids: Vec<String> = self

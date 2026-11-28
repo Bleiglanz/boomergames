@@ -40,7 +40,7 @@ https://games.bleiglanz.info
 
 ENGLISH
 =======
-Boomergames is a 100% free, non-commercial Checkers and 8-Ball Pool portal.
+Boomergames is a 100% free, non-commercial 8-Ball Pool, Checkers, and Chess portal.
 
 1. Data collected when you sign in (Google Sign-In or Email Magic Link):
    - Email address: used solely to identify your account and restore your
@@ -52,23 +52,27 @@ Boomergames is a 100% free, non-commercial Checkers and 8-Ball Pool portal.
      lounge and games. You may change your nickname on every login.
    - Game statistics: Elo ratings, win counts, and recent match summaries.
 
-2. Guest play:
+2. Ephemeral chat:
+   - Lounge and table chat messages are held in memory only and automatically
+     deleted after 24 hours (or sooner when a table closes or the server restarts).
+
+3. Guest play:
    - Playing as a guest requires no email or account. Only an ephemeral guest
-     reconnect token and UI preferences (language, sound, high contrast) are
+     reconnect token and UI preferences (language, sound, theme) are
      stored locally in your browser's localStorage.
 
-3. No cookies, no ads, no tracking:
+4. No cookies, no ads, no tracking:
    - Boomergames sets zero HTTP cookies, displays no ads, uses no analytics or
      tracking scripts, and never sells or shares your data with third parties.
 
-4. Deleting your data:
+5. Deleting your data:
    - You can permanently delete your account, email address, and statistics at
      any time from the Online Lounge: click your name -> Delete Account.
 
 DEUTSCH
 =======
-Boomergames ist ein 100 % kostenloses, nicht-kommerzielles Dame- und
-8-Ball-Billard-Portal.
+Boomergames ist ein 100 % kostenloses, nicht-kommerzielles 8-Ball-Billard-,
+Dame- und Schach-Portal.
 
 1. Gespeicherte Daten bei Anmeldung (Google-Login oder E-Mail-Magic-Link):
    - E-Mail-Adresse: ausschliesslich zur Kontozuordnung sowie zum Wiederherstellen
@@ -79,17 +83,59 @@ Boomergames ist ein 100 % kostenloses, nicht-kommerzielles Dame- und
      (bei jedem Login aenderbar).
    - Spielstatistiken: Elo-Wertungen, Siege und letzte Partien.
 
-2. Keine Cookies, keine Werbung, kein Tracking:
+2. Fluechtiger Chat:
+   - Nachrichten im Raum- und Tisch-Chat werden nur im Arbeitsspeicher gehalten
+     und automatisch nach 24 Stunden geloescht (oder frueher beim Schliessen
+     eines Tisches bzw. Neustart des Servers).
+
+3. Keine Cookies, keine Werbung, kein Tracking:
    - Boomergames setzt keine Cookies, zeigt keine Werbung, nutzt keine
      Analyse- oder Tracking-Dienste und gibt keine Daten an Dritte weiter.
 
-3. Loeschung deiner Daten:
+4. Loeschung deiner Daten:
    - Du kannst dein Konto samt E-Mail-Adresse und Statistiken jederzeit selbst
      dauerhaft loeschen: in der Online-Lounge auf deinen Namen klicken ->
      Konto loeschen.
 ";
 
-/// Builds the complete `axum` [`Router`] exposing only the SPA, `/ws`, `/status`, and `/privacy`.
+/// Plain-text bilingual About / Impressum page served at `GET /about` and `GET /impressum`.
+const IMPRESSUM_ABOUT: &str = "\
+Boomergames — About / Impressum
+https://games.bleiglanz.info
+
+ENGLISH (ABOUT)
+===============
+Boomergames is a private, non-commercial hobby project built for fun and
+nostalgia — a 100% free, ad-free, cookie-free classic 8-Ball Pool, Checkers,
+and Chess lounge inspired by classic 2000s browser games.
+
+Creator & Contact:
+  Anton Rechenauer
+  Email: antonrechenauer@gmail.com
+
+Open Source (Fork It!):
+  https://github.com/Bleiglanz/boomergames
+  Everyone is warmly invited to explore the source code, fork the repository,
+  tinker with it, add new games, or host their own Boomergames lounge!
+
+DEUTSCH (IMPRESSUM / UEBER)
+===========================
+Boomergames ist ein privates, rein nicht-kommerzielles Hobbyprojekt aus Spass
+und Nostalgie — eine 100 % kostenlose, werbe- und cookiefreie Lounge fuer
+8-Ball Billard, Dame und Schach im Stil klassischer 2000er-Browserspiele.
+
+Verantwortlich & Kontakt:
+  Anton Rechenauer
+  E-Mail: antonrechenauer@gmail.com
+
+Open Source (Gerne forken!):
+  https://github.com/Bleiglanz/boomergames
+  Alle sind herzlich eingeladen, den Quellcode anzusehen, das Repository zu
+  forken, eigene Ideen auszuprobieren oder eine eigene Instanz zu betreiben!
+";
+
+/// Builds the complete `axum` [`Router`] exposing only the SPA, `/ws`, `/status`, `/privacy`,
+/// `/about`, and `/impressum`.
 pub fn build_router(state: AppState) -> Router {
     let static_root = PathBuf::from(&state.config.static_dir);
     let assets_dir = static_root.join("assets");
@@ -129,6 +175,8 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/status", get(status_handler))
         .route("/privacy", get(privacy_handler))
+        .route("/about", get(impressum_handler))
+        .route("/impressum", get(impressum_handler))
         .route("/ws", get(ws_upgrade_handler))
         .merge(assets_service)
         .merge(audio_service)
@@ -200,5 +248,12 @@ async fn privacy_handler() -> impl IntoResponse {
     (
         [(CONTENT_TYPE, "text/plain; charset=utf-8")],
         PRIVACY_POLICY,
+    )
+}
+
+async fn impressum_handler() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+        IMPRESSUM_ABOUT,
     )
 }

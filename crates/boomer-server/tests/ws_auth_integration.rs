@@ -174,6 +174,21 @@ async fn status_endpoint_reports_health_and_degradation() {
     assert!(priv_text.contains("Email address"));
     assert!(priv_text.contains("Delete Account"));
 
+    // Public plain-text About / Impressum page available at both `/about` and `/impressum`.
+    for route in ["/about", "/impressum"] {
+        let about_resp = client
+            .get(format!("{}{route}", srv.base_http))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(about_resp.status(), 200);
+        let about_text = about_resp.text().await.unwrap();
+        assert!(about_text.contains("Anton Rechenauer"));
+        assert!(about_text.contains("https://github.com/Bleiglanz/boomergames"));
+        assert!(about_text.contains("antonrechenauer@gmail.com"));
+        assert!(about_text.to_ascii_lowercase().contains("fork"));
+    }
+
     // A degraded backing store returns HTTP 503.
     let degraded = spawn_test_server().await;
     degraded.repos.set_healthy(false);

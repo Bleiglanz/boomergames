@@ -96,6 +96,7 @@ async fn main() {
                 model = %anthropic.model,
                 max_tokens = anthropic.max_tokens,
                 max_calls = anthropic.max_calls,
+                system_prompt_file = %anthropic.system_prompt_file.display(),
                 "configured Anthropic AI Friend chat companion"
             );
             Arc::new(AnthropicAiFriend::new(anthropic))

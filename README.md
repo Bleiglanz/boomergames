@@ -18,7 +18,7 @@ A classic 2000s Yahoo! Games–inspired browser game lounge featuring **8-Ball P
 
 Additional polish across the whole app:
 - **Bilingual UI**: English (`en`) and German (`de`).
-- **Accessibility**: WCAG High-Contrast theme toggle, keyboard navigation, ARIA live announcements.
+- **Themes & Accessibility**: 6 built-in themes (Classic 2000s, Billiard Parlor, Midnight Lounge, Warm Paper, Retro 98, and WCAG High Contrast), keyboard navigation, ARIA live announcements.
 - **Audio**: Procedural Web Audio acoustics with master volume slider + optional CC-BY 4.0 cool jazz lounge background music.
 - **Zero-cookie authentication (Online Lounge)**: Guest play out of the box, optional passwordless Email Magic Link (SMTP) and lazy-loaded Google Sign-In.
 
@@ -148,6 +148,11 @@ cd web && npm run typecheck && npm run build
 | `SMTP_USER` | `""` | SMTP relay username. |
 | `SMTP_PASS` | `""` | SMTP relay password / API key. |
 | `SMTP_FROM` | `Boomergames <noreply@boomergames.local>` | Verified sender address (`From:`) matching your SMTP provider's SPF/DKIM domain. |
+| `ANTHROPIC_API_KEY` | *(unset → disabled)* | Optional Anthropic API key enabling the Claude AI Friend chat companion. |
+| `ANTHROPIC_MODEL` | `claude-haiku-4-5` | Anthropic model ID used for AI Friend replies. |
+| `ANTHROPIC_MAX_TOKENS` | `100` | Maximum output tokens per AI Friend reply (clamped to `32..=256`). |
+| `ANTHROPIC_MAX_CALLS` | `50` | Hard server-wide safety cap on Anthropic API calls per process run. |
+| `ANTHROPIC_SYSTEM_PROMPT_FILE` | `/etc/boomergames/ai_system_prompt.txt` | Optional UTF-8 text file overriding the built-in AI Friend system prompt (reloaded live on each reply; falls back to the built-in prompt if missing or empty). |
 | `BOOMER_LOG_FORMAT` | *(text)* | Set to `json` for structured JSON logs in production. |
 
 > Never commit `.env` files, keys, or secrets. `.env` and `.env.*` are gitignored.

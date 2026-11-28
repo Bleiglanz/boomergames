@@ -1,5 +1,6 @@
 //! Anthropic Claude Messages API adapter for the optional AI Friend chat companion.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -37,7 +38,7 @@ switch games via the Room dropdown in the lounge toolbar (or click Offline Play 
 click Play Now for quick matchmaking, Create Table to host your own table, or Join/Watch any table (including always-open House Bot tables), then press Ready/Start; \
 click Copy Link at a table to invite a friend; \
 click your name/Sign In (Google or Email Magic Link, zero cookies) for rated Elo, High Scores, and Profiles; \
-header has Sound/Volume, Jazz music, High Contrast, and EN/DE language; \
+header has Sound/Volume, Jazz music, Themes (including High Contrast), and EN/DE language; \
 in-game: Pool uses drag-back slingshot aiming (drag cue ball for ball-in-hand), Checkers/Chess use click or drag, and pressing F opens Full-Screen (right-drag/Shift-drag/scroll or 2-finger pinch tilts into a secret 3D table/board view; C = behind-cue cam in Pool; R = reset to 2D). \
 Keep every reply to 1-2 short conversational sentences under 240 characters, plain text only, \
 with no markdown formatting and no speaker prefix like \"Claude:\".";
@@ -86,15 +87,65 @@ pub struct AnthropicAiFriend {
     model: String,
     max_tokens: u32,
     max_calls: u32,
+    system_prompt_file: PathBuf,
     calls_used: AtomicU32,
     concurrency: Arc<Semaphore>,
     http: reqwest::Client,
+}
+
+/// Reads and trims an optional UTF-8 system prompt override file from disk.
+///
+/// Returns `Ok(None)` if the file does not exist or contains only whitespace.
+///
+/// # Errors
+/// Returns an [`std::io::Error`] if the file exists but cannot be read.
+pub fn read_system_prompt_from_path(path: &Path) -> Result<Option<String>, std::io::Error> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 impl AnthropicAiFriend {
     /// Creates a new [`AnthropicAiFriend`] from [`AnthropicConfig`].
     #[must_use]
     pub fn new(config: &AnthropicConfig) -> Self {
+        match read_system_prompt_from_path(&config.system_prompt_file) {
+            Ok(Some(prompt)) => {
+                info!(
+                    path = %config.system_prompt_file.display(),
+                    chars = prompt.chars().count(),
+                    "loaded custom AI Friend system prompt file"
+                );
+            }
+            Ok(None) if config.system_prompt_file_explicit => {
+                warn!(
+                    path = %config.system_prompt_file.display(),
+                    "ANTHROPIC_SYSTEM_PROMPT_FILE not found or empty; using built-in AI Friend system prompt"
+                );
+            }
+            Ok(None) => {
+                info!(
+                    path = %config.system_prompt_file.display(),
+                    "custom AI Friend system prompt file not present; using built-in prompt"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    path = %config.system_prompt_file.display(),
+                    %err,
+                    "failed to read AI Friend system prompt file; using built-in prompt"
+                );
+            }
+        }
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -104,9 +155,36 @@ impl AnthropicAiFriend {
             model: config.model.clone(),
             max_tokens: config.max_tokens,
             max_calls: config.max_calls,
+            system_prompt_file: config.system_prompt_file.clone(),
             calls_used: AtomicU32::new(0),
             concurrency: Arc::new(Semaphore::new(MAX_CONCURRENT_CALLS)),
             http,
+        }
+    }
+
+    /// Loads the configured system prompt file on demand (allowing live edits without restart),
+    /// falling back cleanly to [`AI_FRIEND_SYSTEM_PROMPT`] if absent, empty, or unreadable.
+    async fn resolve_system_prompt(&self) -> String {
+        match tokio::fs::read_to_string(&self.system_prompt_file).await {
+            Ok(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    AI_FRIEND_SYSTEM_PROMPT.to_owned()
+                } else {
+                    trimmed.to_owned()
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                AI_FRIEND_SYSTEM_PROMPT.to_owned()
+            }
+            Err(err) => {
+                warn!(
+                    path = %self.system_prompt_file.display(),
+                    %err,
+                    "failed to read AI Friend system prompt file; falling back to built-in prompt"
+                );
+                AI_FRIEND_SYSTEM_PROMPT.to_owned()
+            }
         }
     }
 
@@ -193,10 +271,11 @@ impl AiFriend for AnthropicAiFriend {
                 return Err(PortError::Unavailable("ai semaphore closed".to_owned()));
             };
 
+            let system_prompt = self.resolve_system_prompt().await;
             let req_body = AnthropicRequest {
                 model: &self.model,
                 max_tokens: self.max_tokens,
-                system: AI_FRIEND_SYSTEM_PROMPT,
+                system: &system_prompt,
                 messages: [AnthropicMessage {
                     role: "user",
                     content: Self::format_user_prompt(&ctx),
@@ -298,6 +377,8 @@ mod tests {
             model: "claude-haiku-4-5".to_owned(),
             max_tokens: 100,
             max_calls: 2,
+            system_prompt_file: PathBuf::from("/nonexistent/boomer_ai_prompt_test.txt"),
+            system_prompt_file_explicit: false,
         };
         let client = AnthropicAiFriend::new(&cfg);
         assert_eq!(client.try_reserve_call(), Ok(1));
@@ -306,6 +387,55 @@ mod tests {
             client.try_reserve_call(),
             Err(PortError::Conflict(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn system_prompt_file_overrides_default_and_reloads_live() {
+        let path = std::env::temp_dir().join(format!(
+            "boomer-ai-prompt-test-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let cfg = AnthropicConfig {
+            api_key: "test-key-never-sent".to_owned(),
+            model: "claude-haiku-4-5".to_owned(),
+            max_tokens: 100,
+            max_calls: 2,
+            system_prompt_file: path.clone(),
+            system_prompt_file_explicit: true,
+        };
+        let client = AnthropicAiFriend::new(&cfg);
+
+        // Missing file -> falls back to built-in default.
+        assert_eq!(
+            client.resolve_system_prompt().await,
+            AI_FRIEND_SYSTEM_PROMPT
+        );
+
+        // Custom file -> loaded and trimmed.
+        std::fs::write(&path, "  Custom billiard host prompt.  \n").unwrap();
+        assert_eq!(
+            client.resolve_system_prompt().await,
+            "Custom billiard host prompt."
+        );
+
+        // Live edit -> reloaded without recreating client.
+        std::fs::write(&path, "Updated chess club prompt.").unwrap();
+        assert_eq!(
+            client.resolve_system_prompt().await,
+            "Updated chess club prompt."
+        );
+
+        // Whitespace-only file -> falls back to built-in default.
+        std::fs::write(&path, "   \n\t  ").unwrap();
+        assert_eq!(
+            client.resolve_system_prompt().await,
+            AI_FRIEND_SYSTEM_PROMPT
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

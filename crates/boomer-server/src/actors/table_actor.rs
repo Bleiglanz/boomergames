@@ -29,7 +29,8 @@ use crate::actors::game_session::{
 use crate::actors::hub::LobbyHub;
 use crate::actors::lobby_actor::LobbyEvent;
 use crate::actors::{
-    ClientSink, MAX_CHAT_HISTORY, bot_user_dto, broadcast_msg, sanitize_chat_text,
+    ClientSink, MAX_CHAT_HISTORY, bot_user_dto, broadcast_msg, prune_expired_chat,
+    sanitize_chat_text,
 };
 use crate::mapping::{
     bot_level_to_db, format_user_id, game_kind_from_dto, parse_user_id, seat_to_dto,
@@ -544,6 +545,7 @@ impl TableActor {
                 return false;
             }
             TableCmd::DumpChat { reply } => {
+                self.prune_expired_chat();
                 let transcript = self
                     .chat
                     .iter()
@@ -649,6 +651,7 @@ impl TableActor {
             self.broadcast_table_msg(&ServerMessage::GameResume {});
         }
 
+        self.prune_expired_chat();
         let game_snap = self
             .active_game
             .as_ref()
@@ -657,6 +660,7 @@ impl TableActor {
     }
 
     fn on_tick_one_sec(&mut self) {
+        self.prune_expired_chat();
         if self.phase != TablePhaseDto::Playing || self.disconnected_seat.is_some() {
             return;
         }
@@ -702,6 +706,7 @@ impl TableActor {
         }
 
         if self.find_human_seat(&uid).is_some() || self.watchers.contains_key(&uid) {
+            self.prune_expired_chat();
             let snap = self.snapshot();
             if let Some(ref game) = self.active_game {
                 let _ = client
@@ -740,6 +745,7 @@ impl TableActor {
         };
 
         self.hub.set_user_table(&uid, &self.id);
+        self.prune_expired_chat();
         let snap = self.snapshot();
         if let Some(ref game) = self.active_game {
             let _ = join_sink.send_msg(&game.snapshot_message(self.bot_thinking));
@@ -927,6 +933,7 @@ impl TableActor {
             .active_game
             .as_ref()
             .map_or_else(String::new, |g| format!(", turn {}", g.turn_number()));
+        self.prune_expired_chat();
         let ctx = AiChatContext {
             setting: format!(
                 "Table #{} ({}, {}: {} vs {}{}, {} spectators)",
@@ -1855,7 +1862,12 @@ impl TableActor {
         });
     }
 
+    fn prune_expired_chat(&mut self) {
+        prune_expired_chat(&mut self.chat, Utc::now().timestamp_millis());
+    }
+
     fn push_chat_and_broadcast(&mut self, line: ChatLineDto) {
+        self.prune_expired_chat();
         if self.chat.len() >= MAX_CHAT_HISTORY {
             let _ = self.chat.pop_front();
         }

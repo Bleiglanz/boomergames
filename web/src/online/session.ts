@@ -182,6 +182,12 @@ export interface OnlineState {
 const SESSION_KEY = "boomer_session_token_v1";
 const GUEST_KEY = "boomer_guest_token_v1";
 const PROTOCOL_VERSION = 1;
+const CHAT_RETENTION_MS = 24 * 60 * 60 * 1_000;
+const CHAT_PRUNE_INTERVAL_MS = 60_000;
+
+function pruneExpiredChatLines(lines: readonly ChatLineDto[], nowMs = Date.now()): ChatLineDto[] {
+  return lines.filter((line) => nowMs - line.ts < CHAT_RETENTION_MS);
+}
 
 function readStorage(key: string): string | null {
   try {
@@ -249,6 +255,7 @@ export class OnlineSession {
   private ws: WebSocket | null = null;
   private backoffMs = 1_000;
   private reconnectTimer: number | null = null;
+  private chatPruneTimer: number | null = null;
   private intentionallyClosed = false;
   private pendingLoginToken: string | null = null;
   private pendingTableLink: string | null = null;
@@ -345,6 +352,10 @@ export class OnlineSession {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.chatPruneTimer !== null) {
+      window.clearInterval(this.chatPruneTimer);
+      this.chatPruneTimer = null;
+    }
     if (this.ws !== null) {
       this.ws.close();
       this.ws = null;
@@ -352,6 +363,31 @@ export class OnlineSession {
     this.state.status = "idle";
     this.latestGameFrameJson = null;
     this.notify();
+  }
+
+  private startChatPruneTimer(): void {
+    if (this.chatPruneTimer !== null) {
+      return;
+    }
+    this.chatPruneTimer = window.setInterval(() => {
+      const nowMs = Date.now();
+      let changed = false;
+      const nextLobby = pruneExpiredChatLines(this.state.lobbyChat, nowMs);
+      if (nextLobby.length !== this.state.lobbyChat.length) {
+        this.state.lobbyChat = nextLobby;
+        changed = true;
+      }
+      if (this.state.activeTable !== null) {
+        const nextTableChat = pruneExpiredChatLines(this.state.activeTable.chat, nowMs);
+        if (nextTableChat.length !== this.state.activeTable.chat.length) {
+          this.state.activeTable = { ...this.state.activeTable, chat: nextTableChat };
+          changed = true;
+        }
+      }
+      if (changed) {
+        this.notify();
+      }
+    }, CHAT_PRUNE_INTERVAL_MS);
   }
 
   send(type: string, data: Record<string, unknown>): void {
@@ -534,6 +570,7 @@ export class OnlineSession {
 
     ws.addEventListener("open", () => {
       this.backoffMs = 1_000;
+      this.startChatPruneTimer();
       const session = readStorage(SESSION_KEY);
       const guest = readStorage(GUEST_KEY);
       const hello: Record<string, unknown> = { v: PROTOCOL_VERSION };
@@ -622,7 +659,7 @@ export class OnlineSession {
         this.state.me = snap.me;
         this.state.users = [...snap.users];
         this.state.tables = [...snap.tables];
-        this.state.lobbyChat = [...snap.chat];
+        this.state.lobbyChat = pruneExpiredChatLines(snap.chat);
         this.state.aiFriendAvailable = Boolean(snap.aiFriendAvailable);
         this.state.lobbyAiFriend = Boolean(snap.aiFriend);
         this.state.onlineCount = snap.online;
@@ -688,10 +725,10 @@ export class OnlineSession {
           ai: Boolean(d.ai),
         };
         if (scope === "table" && this.state.activeTable !== null) {
-          const nextChat = [...this.state.activeTable.chat, line].slice(-50);
+          const nextChat = pruneExpiredChatLines([...this.state.activeTable.chat, line]).slice(-50);
           this.state.activeTable = { ...this.state.activeTable, chat: nextChat };
         } else {
-          this.state.lobbyChat = [...this.state.lobbyChat, line].slice(-50);
+          this.state.lobbyChat = pruneExpiredChatLines([...this.state.lobbyChat, line]).slice(-50);
         }
         break;
       }
@@ -713,7 +750,10 @@ export class OnlineSession {
         if (nextTable.aiFriendAvailable !== undefined) {
           this.state.aiFriendAvailable = Boolean(nextTable.aiFriendAvailable);
         }
-        this.state.activeTable = nextTable;
+        this.state.activeTable = {
+          ...nextTable,
+          chat: pruneExpiredChatLines(nextTable.chat),
+        };
         this.state.playNowState = "idle";
         break;
       }

@@ -10,7 +10,7 @@ import {
   type ChatLineDto,
   type TableSnapshotDto,
 } from "./online/session.js";
-import { loadPrefs, savePrefs, type UserPrefs } from "./prefs.js";
+import { loadPrefs, savePrefs, THEME_IDS, type ThemeId, type UserPrefs } from "./prefs.js";
 import { StageRenderer } from "./render/renderer.js";
 import { LobbyController } from "./ui/lobby.js";
 import {
@@ -390,7 +390,7 @@ async function bootstrap(): Promise<void> {
   let mountedShell: MountedShell | null = null;
   let lastScreenKey = "";
   let liveRegion: HTMLElement | null = null;
-  let contrastBtnRef: HTMLButtonElement | null = null;
+  let themeSelectRef: HTMLSelectElement | null = null;
   let lastAnnouncement = "";
   let poolFullscreen = false;
   let checkersFullscreen = false;
@@ -589,7 +589,8 @@ async function bootstrap(): Promise<void> {
         : prefs.chessShowCoords;
     prefs = {
       lang: vm.lang === "de" ? "de" : "en",
-      highContrast: vm.highContrast,
+      theme: prefs.theme,
+      highContrast: prefs.theme === "high_contrast",
       muted: synth.isMuted(),
       volume: synth.getVolume(),
       musicEnabled: music.isEnabled(),
@@ -598,6 +599,31 @@ async function bootstrap(): Promise<void> {
       chessShowCoords: showCoords,
     };
     savePrefs(prefs);
+  };
+
+  const applyTheme = (theme: ThemeId): void => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.dataset.contrast = theme === "high_contrast" ? "high" : "standard";
+    if (themeSelectRef !== null && themeSelectRef.value !== theme) {
+      themeSelectRef.value = theme;
+    }
+  };
+
+  const themeDisplayName = (theme: ThemeId, s: Strings): string => {
+    switch (theme) {
+      case "classic":
+        return s.themeClassic;
+      case "parlor":
+        return s.themeParlor;
+      case "midnight":
+        return s.themeMidnight;
+      case "sepia":
+        return s.themeSepia;
+      case "retro98":
+        return s.themeRetro98;
+      case "high_contrast":
+        return s.themeHighContrast;
+    }
   };
 
   music.subscribe(() => {
@@ -695,7 +721,7 @@ async function bootstrap(): Promise<void> {
     syncStockfish(vm);
     const s = getStrings(vm.lang);
     document.documentElement.lang = vm.lang;
-    document.documentElement.dataset.contrast = vm.highContrast ? "high" : "standard";
+    applyTheme(prefs.theme);
 
     const screenKey =
       onlineMatch !== null
@@ -712,12 +738,7 @@ async function bootstrap(): Promise<void> {
       mountedShell !== null &&
       screenKey === lastScreenKey
     ) {
-      if (contrastBtnRef !== null) {
-        contrastBtnRef.className = vm.highContrast
-          ? "classic-btn active-toggle"
-          : "classic-btn";
-        contrastBtnRef.setAttribute("aria-pressed", String(vm.highContrast));
-      }
+      applyTheme(prefs.theme);
       updateGameShellInPlace(
         mountedShell,
         vm,
@@ -891,18 +912,38 @@ async function bootstrap(): Promise<void> {
     syncMusicButtons();
     musicWrap.append(musicBtn, nextTrackBtn);
 
-    const contrastBtn = makeButton(
-      s.highContrast,
-      () => dispatchAndRender({ kind: "toggle_high_contrast" }),
-      { active: vm.highContrast },
-    );
-    contrastBtn.setAttribute("aria-pressed", String(vm.highContrast));
-    contrastBtnRef = contrastBtn;
+    const themeSelect = document.createElement("select");
+    themeSelect.className = "classic-select theme-select";
+    themeSelect.setAttribute("aria-label", s.themeLabel);
+    themeSelect.title = s.themeLabel;
+    for (const id of THEME_IDS) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = themeDisplayName(id, s);
+      themeSelect.append(opt);
+    }
+    themeSelect.value = prefs.theme;
+    themeSelect.addEventListener("change", () => {
+      const nextTheme = themeSelect.value as ThemeId;
+      if (!(THEME_IDS as readonly string[]).includes(nextTheme)) {
+        return;
+      }
+      const wasHighContrast = prefs.theme === "high_contrast";
+      const nextHighContrast = nextTheme === "high_contrast";
+      prefs = { ...prefs, theme: nextTheme, highContrast: nextHighContrast };
+      applyTheme(nextTheme);
+      if (wasHighContrast !== nextHighContrast) {
+        bridge.dispatch({ kind: "toggle_high_contrast" });
+        remoteBridge?.dispatch({ kind: "toggle_high_contrast" });
+      }
+      persistFromVm(activeBridge().viewModel());
+    });
+    themeSelectRef = themeSelect;
 
     controls.append(
       soundWrap,
       musicWrap,
-      contrastBtn,
+      themeSelect,
       makeButton(vm.lang === "en" ? "Deutsch" : "English", () =>
         dispatchAndRender({ kind: "set_language", lang: vm.lang === "en" ? "de" : "en" }),
       ),
@@ -1113,12 +1154,20 @@ async function bootstrap(): Promise<void> {
     footerMainRow.className = "footer-row";
     const footerText = document.createElement("span");
     footerText.textContent = s.footerNote;
+    const footerLinks = document.createElement("span");
+    footerLinks.className = "footer-links";
+    const aboutAnchor = document.createElement("a");
+    aboutAnchor.href = "/impressum";
+    aboutAnchor.target = "_blank";
+    aboutAnchor.rel = "noopener";
+    aboutAnchor.textContent = s.aboutLink;
     const privacyAnchor = document.createElement("a");
     privacyAnchor.href = "/privacy";
     privacyAnchor.target = "_blank";
     privacyAnchor.rel = "noopener";
     privacyAnchor.textContent = s.privacyLink;
-    footerMainRow.append(footerText, privacyAnchor);
+    footerLinks.append(aboutAnchor, document.createTextNode("·"), privacyAnchor);
+    footerMainRow.append(footerText, footerLinks);
 
     const makeExternalLink = (href: string, label: string): HTMLAnchorElement => {
       const a = document.createElement("a");

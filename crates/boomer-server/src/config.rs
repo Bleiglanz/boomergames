@@ -1,5 +1,7 @@
 //! Environment-driven server configuration with safe local development defaults.
 
+use std::path::PathBuf;
+
 /// SMTP configuration for sending passwordless magic links (port 587 STARTTLS).
 #[derive(Debug, Clone)]
 pub struct SmtpConfig {
@@ -24,6 +26,9 @@ pub const DEFAULT_ANTHROPIC_MAX_TOKENS: u32 = 100;
 /// Default server-wide safety cap on Anthropic API calls per process run.
 pub const DEFAULT_ANTHROPIC_MAX_CALLS: u32 = 50;
 
+/// Default filesystem path checked for an optional custom AI Friend system prompt.
+pub const DEFAULT_ANTHROPIC_SYSTEM_PROMPT_FILE: &str = "/etc/boomergames/ai_system_prompt.txt";
+
 /// Anthropic Messages API configuration for the optional Claude AI Friend.
 #[derive(Debug, Clone)]
 pub struct AnthropicConfig {
@@ -35,6 +40,11 @@ pub struct AnthropicConfig {
     pub max_tokens: u32,
     /// Hard server-wide call cap (`ANTHROPIC_MAX_CALLS`, default `50`).
     pub max_calls: u32,
+    /// Optional UTF-8 text file overriding the built-in AI Friend system prompt
+    /// (`ANTHROPIC_SYSTEM_PROMPT_FILE`, default `/etc/boomergames/ai_system_prompt.txt`).
+    pub system_prompt_file: PathBuf,
+    /// `true` when `ANTHROPIC_SYSTEM_PROMPT_FILE` was explicitly configured in the environment.
+    pub system_prompt_file_explicit: bool,
 }
 
 /// Runtime configuration for `boomer-server`.
@@ -109,24 +119,37 @@ impl ServerConfig {
             .ok()
             .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
-            .map(|api_key| AnthropicConfig {
-                api_key,
-                model: std::env::var("ANTHROPIC_MODEL")
+            .map(|api_key| {
+                let explicit_prompt = std::env::var("ANTHROPIC_SYSTEM_PROMPT_FILE")
                     .ok()
                     .map(|v| v.trim().to_owned())
-                    .filter(|v| !v.is_empty())
-                    .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_owned()),
-                max_tokens: std::env::var("ANTHROPIC_MAX_TOKENS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .filter(|&n| n > 0)
-                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
-                    .clamp(32, 256),
-                max_calls: std::env::var("ANTHROPIC_MAX_CALLS")
-                    .ok()
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .filter(|&n| n > 0)
-                    .unwrap_or(DEFAULT_ANTHROPIC_MAX_CALLS),
+                    .filter(|v| !v.is_empty());
+                let system_prompt_file_explicit = explicit_prompt.is_some();
+                let system_prompt_file = explicit_prompt.map_or_else(
+                    || PathBuf::from(DEFAULT_ANTHROPIC_SYSTEM_PROMPT_FILE),
+                    PathBuf::from,
+                );
+                AnthropicConfig {
+                    api_key,
+                    model: std::env::var("ANTHROPIC_MODEL")
+                        .ok()
+                        .map(|v| v.trim().to_owned())
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_owned()),
+                    max_tokens: std::env::var("ANTHROPIC_MAX_TOKENS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .filter(|&n| n > 0)
+                        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS)
+                        .clamp(32, 256),
+                    max_calls: std::env::var("ANTHROPIC_MAX_CALLS")
+                        .ok()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .filter(|&n| n > 0)
+                        .unwrap_or(DEFAULT_ANTHROPIC_MAX_CALLS),
+                    system_prompt_file,
+                    system_prompt_file_explicit,
+                }
             });
 
         Self {

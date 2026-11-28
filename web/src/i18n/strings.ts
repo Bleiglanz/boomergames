@@ -4,6 +4,13 @@ export interface Strings {
   readonly subtitle: string;
   readonly offlineBadge: string;
   readonly highContrast: string;
+  readonly themeLabel: string;
+  readonly themeClassic: string;
+  readonly themeParlor: string;
+  readonly themeMidnight: string;
+  readonly themeSepia: string;
+  readonly themeRetro98: string;
+  readonly themeHighContrast: string;
   readonly soundOn: string;
   readonly soundOff: string;
   readonly soundVolume: string;
@@ -53,6 +60,7 @@ export interface Strings {
   readonly statusLabel: string;
   readonly modeLabel: string;
   readonly footerNote: string;
+  readonly aboutLink: string;
   readonly privacyLink: string;
   readonly player1: string;
   readonly player2: string;
@@ -222,6 +230,13 @@ const EN: Strings = {
   subtitle: "Classic Offline Lounge",
   offlineBadge: "Offline WASM",
   highContrast: "High Contrast",
+  themeLabel: "Theme",
+  themeClassic: "🎨 Classic 2000s",
+  themeParlor: "🎱 Billiard Parlor",
+  themeMidnight: "🌙 Midnight Lounge",
+  themeSepia: "📜 Warm Paper",
+  themeRetro98: "🖥️ Retro 98",
+  themeHighContrast: "◐ High Contrast",
   soundOn: "Sound: On",
   soundOff: "Sound: Off",
   soundVolume: "Sound Volume",
@@ -271,6 +286,7 @@ const EN: Strings = {
   statusLabel: "Status",
   modeLabel: "Mode",
   footerNote: "100% free · No cookies · Runs locally in Rust/WebAssembly",
+  aboutLink: "About / Impressum",
   privacyLink: "Privacy Policy",
   player1: "Player 1",
   player2: "Player 2",
@@ -439,6 +455,13 @@ const DE: Strings = {
   subtitle: "Klassische Offline-Lounge",
   offlineBadge: "Offline WASM",
   highContrast: "Hoher Kontrast",
+  themeLabel: "Design",
+  themeClassic: "🎨 Klassisch 2000er",
+  themeParlor: "🎱 Billard-Salon",
+  themeMidnight: "🌙 Mitternachts-Lounge",
+  themeSepia: "📜 Warmes Papier",
+  themeRetro98: "🖥️ Retro 98",
+  themeHighContrast: "◐ Hoher Kontrast",
   soundOn: "Ton: An",
   soundOff: "Ton: Aus",
   soundVolume: "Lautstärke",
@@ -488,6 +511,7 @@ const DE: Strings = {
   statusLabel: "Status",
   modeLabel: "Modus",
   footerNote: "100 % kostenlos · Keine Cookies · Läuft lokal in Rust/WebAssembly",
+  aboutLink: "Impressum / Über",
   privacyLink: "Datenschutz",
   player1: "Spieler 1",
   player2: "Spieler 2",
